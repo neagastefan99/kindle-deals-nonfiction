@@ -172,7 +172,7 @@ class AmazonDealsScraper(BaseScraper):
                 "author": author,
                 "price": price,
                 "url": url,
-                "from_sff_page": True,
+                # Non-fiction: don't skip genre filtering (different bot, different rules)
             })
         
         return books
@@ -228,7 +228,7 @@ class AmazonDealsScraper(BaseScraper):
                 "author": author,
                 "price": price,
                 "url": url,
-                "from_sff_page": True,
+                # Non-fiction: don't skip genre filtering (different bot, different rules)
             })
         
         return books
@@ -286,7 +286,6 @@ class AmazonDealsScraper(BaseScraper):
                             "author": str(obj.get("author", obj.get("byline", ""))),
                             "price": price,
                             "url": f"{self.base_url}/dp/{asin}",
-                            "from_sff_page": True,
                         })
                     return
                 for v in obj.values():
