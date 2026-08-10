@@ -19,7 +19,7 @@ sources:
 filters:
   max_price: 4.99
   
-  # Non-fiction genres and keywords
+  # Non-fiction genres and keywords (check titles AND descriptions for these)
   genres:
     - science
     - physics
@@ -28,19 +28,80 @@ filters:
     - chemistry
     - astronomy
     - history
+    - historian
     - philosophy
+    - philosopher
     - biography
+    - memoir
     - economics
     - psychology
     - neuroscience
     - anthropology
     - sociology
     - politics
+    - political
     - nature
     - evolution
     - cosmology
     - quantum
     - genetics
+    - true story
+    - how to
+    - guide to
+    - history of
+    - life of
+    - story of
+    - world war
+    - ancient
+    - century
+    - civilization
+    - universe
+    - brain
+    - mind
+    - thinking
+    - theory
+    - principles
+    - evidence
+    - discovery
+    - invention
+    - war
+    - revolution
+    - empire
+    - president
+    - america
+    - europe
+    - rome
+    - greek
+    - roman
+    - medieval
+    - modern
+    - einstein
+    - darwin
+    - feynman
+    - hawking
+    - sagan
+    - weapon
+    - nuclear
+    - atomic
+    - dna
+    - gene
+    - species
+    - planet
+    - earth
+    - space
+    - time
+    - black hole
+    - relativity
+    - mathematics
+    - calculus
+    - algorithm
+    - artificial intelligence
+    - machine learning
+    - data
+    - numbers
+    - statistics
+    - code
+    - cryptography
   
   tracked_authors: []
 
