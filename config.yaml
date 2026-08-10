@@ -1,0 +1,57 @@
+# Kindle Non-Fiction Deals Bot Configuration
+
+sources:
+  amazon:
+    base_url: "https://www.amazon.com"
+    # Science & Math deals
+    science_deals: "/Science-Math-Todays-Deals/s?rh=n:5,p_n_deal_type:23566064011"
+    # History deals
+    history_deals: "/History-Todays-Deals/s?rh=n:9,p_n_deal_type:23566064011"
+    # Philosophy deals
+    philosophy_deals: "/Politics-Philosophy-Todays-Deals/s?rh=n:3377866011,p_n_deal_type:23566064011"
+    # Science Best Sellers
+    science_best_sellers: "/Best-Sellers-Kindle-Store-Science-Math/zgbs/digital-text/158515011"
+    # History Best Sellers
+    history_best_sellers: "/Best-Sellers-Kindle-Store-History/zgbs/digital-text/158517011"
+    # Non-fiction general deals
+    nonfiction_general: "/Nonfiction-Todays-Deals/s?rh=n:157325011,p_n_deal_type:23566064011"
+
+filters:
+  max_price: 4.99
+  
+  # Non-fiction genres and keywords
+  genres:
+    - science
+    - physics
+    - mathematics
+    - biology
+    - chemistry
+    - astronomy
+    - history
+    - philosophy
+    - biography
+    - economics
+    - psychology
+    - neuroscience
+    - anthropology
+    - sociology
+    - politics
+    - nature
+    - evolution
+    - cosmology
+    - quantum
+    - genetics
+  
+  tracked_authors: []
+
+scraping:
+  request_delay: 2
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+  max_books_per_source: 50
+
+covers:
+  enabled: true
+  max_count: 10
+  dir: "data/covers"
