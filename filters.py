@@ -11,6 +11,7 @@ class BookFilter:
         self.genres = [g.lower() for g in fc.get("genres", fc.get("topics", []))]
         self.tracked_authors = [a.lower() for a in fc.get("tracked_authors", [])]
         self.exclude_keywords = [k.lower() for k in fc.get("exclude_keywords", [])]
+        self.exclude_patterns = fc.get("exclude_patterns", [])
     
     def matches_price(self, price: float | None) -> bool:
         """Book must have a price and be under the cap."""
@@ -75,6 +76,8 @@ class BookFilter:
             # Exclude fiction: check title+author for negative keywords
             text = f"{title} {author}".lower()
             if any(kw in text for kw in self.exclude_keywords):
+                continue
+            if any(re.search(pat, text) for pat in self.exclude_patterns):
                 continue
             
             results.append(book)

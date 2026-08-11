@@ -58,7 +58,14 @@ filters:
   - statistics
   - code
   - cryptography
+  exclude_patterns:
+  - 'book\s+\d+'
+  - 'book\s+(one|two|three|four|five|six|seven|eight|nine|ten)'
+  - 'series\s+book'
+  - '#\d+'
+  - 'vol(?:ume)?\s+\d+'
   exclude_keywords:
+  # Original (kept)
   - romantasy
   - vampire
   - werewolf
@@ -74,6 +81,79 @@ filters:
   - fairy
   - shifter
   - mage
+  # Core additions
+  - novel
+  - romance
+  - trilogy
+  - saga
+  - fiction
+  # Book formats
+  - novella
+  - short story
+  - a novel
+  - chronicles
+  # Fantasy subgenres
+  - dark fantasy
+  - urban fantasy
+  - epic fantasy
+  - high fantasy
+  - portal fantasy
+  - sword and sorcery
+  - litrpg
+  - gamelit
+  - grimdark
+  # Romance subgenres
+  - paranormal romance
+  - dark romance
+  - shifter romance
+  - mm romance
+  - enemies to lovers
+  # Romance tropes
+  - alpha male
+  - harem
+  - steamy
+  - billionaire
+  # Horror/supernatural
+  - horror
+  - gothic
+  - supernatural
+  - paranormal
+  - ghost story
+  - haunted house
+  - zombie
+  - apocalypse
+  - post-apocalyptic
+  # Sci-fi
+  - dystopian
+  - cyberpunk
+  - space opera
+  - magical realism
+  # Mystery/thriller
+  - thriller
+  - murder mystery
+  - cozy mystery
+  - detective
+  - crime fiction
+  # Expanded fantasy creatures
+  - vampires
+  - werewolves
+  - dragons
+  - dungeons
+  - elves
+  - dwarves
+  - orcs
+  # Magic systems
+  - sorcery
+  - witchcraft
+  - spellbook
+  - grimoire
+  - necromancy
+  # Common tropes
+  - immortal
+  - lucifer
+  - prophecy
+  - chosen one
+  - dark lord
   tracked_authors: []
 scraping:
   request_delay: 2
@@ -84,6 +164,7 @@ scraping:
     Gecko) Version/17.4 Safari/605.1.15
   max_books_per_source: 50
   engine: lightpanda
+  auto_fallback: true
   lightpanda_bin: /tmp/lightpanda-spike/lightpanda
   lightpanda_cookies: /tmp/lightpanda-cookies.json
   lightpanda_wait_ms: 6000
