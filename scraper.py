@@ -12,8 +12,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from curl_cffi import requests as cffi_requests
-from sources.amazon import AmazonDealsScraper
+from sources.amazon import AmazonDealsScraper, CurlCffiFetcher
 from sources.lightpanda_fetcher import LightpandaFetcher
+from sources.fallback_fetcher import FallbackFetcher
 from filters import BookFilter
 from formatter import format_report, format_empty_report
 from storage import Storage
@@ -33,7 +34,10 @@ def make_scraper(config: dict) -> AmazonDealsScraper:
     engine = config.get("scraping", {}).get("engine", "curl_cffi")
     if engine == "lightpanda":
         print(f"  ⚡ Engine: Lightpanda browser", file=sys.stderr)
-        return AmazonDealsScraper(config, fetcher=LightpandaFetcher(config))
+        primary = LightpandaFetcher(config)
+        fallback = CurlCffiFetcher(config)
+        fetcher = FallbackFetcher(primary, fallback, config)
+        return AmazonDealsScraper(config, fetcher=fetcher)
     print(f"  🔌 Engine: curl_cffi", file=sys.stderr)
     return AmazonDealsScraper(config)
 
