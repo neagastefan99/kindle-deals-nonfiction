@@ -1,101 +1,93 @@
-# Kindle Non-Fiction Deals Bot Configuration
-
 sources:
   amazon:
-    base_url: "https://www.amazon.com"
-    # General nonfiction deals (node 157325011 = Nonfiction Kindle)
-    nonfiction_deals: "/Nonfiction-Todays-Deals/s?rh=n:157325011,p_n_deal_type:23566064011"
-    # Science & Math Best Sellers (node 158515011)
-    science_bestsellers: "/Best-Sellers-Kindle-Store-Science-Math/zgbs/digital-text/158515011"
-    # History Best Sellers (node 158517011) 
-    history_bestsellers: "/Best-Sellers-Kindle-Store-History/zgbs/digital-text/158517011"
-    # Politics & Social Sciences Best Sellers (node 158519011)
-    politics_bestsellers: "/Best-Sellers-Kindle-Store-Politics-Social-Sciences/zgbs/digital-text/158519011"
-
+    base_url: https://www.amazon.com
+    nonfiction_deals: /Nonfiction-Todays-Deals/s?rh=n:157325011,p_n_deal_type:23566064011
+    science_bestsellers: /Best-Sellers-Kindle-Store-Science-Math/zgbs/digital-text/158515011
+    history_bestsellers: /Best-Sellers-Kindle-Store-History/zgbs/digital-text/158517011
+    politics_bestsellers: /Best-Sellers-Kindle-Store-Politics-Social-Sciences/zgbs/digital-text/158519011
 filters:
   max_price: 4.99
-  
-  # Non-fiction topics — books must contain at least one of these in title/author
   topics:
-    - science
-    - physics
-    - math
-    - biology
-    - chemistry
-    - astronomy
-    - cosmology
-    - history
-    - philosophy
-    - biography
-    - memoir
-    - economics
-    - psychology
-    - neuroscience
-    - anthropology
-    - sociology
-    - politics
-    - nature
-    - evolution
-    - quantum
-    - genetics
-    - war
-    - empire
-    - civilization
-    - universe
-    - brain
-    - mind
-    - theory
-    - discovery
-    - true story
-    - how to
-    - guide to
-    - secret
-    - einstein
-    - darwin
-    - feynman
-    - hawking
-    - sagan
-    - dna
-    - planet
-    - earth
-    - space
-    - time
-    - relativity
-    - algorithm
-    - artificial intelligence
-    - machine learning
-    - statistics
-    - code
-    - cryptography
-  
-  # Negative keywords — exclude books with these fiction indicators
+  - science
+  - physics
+  - math
+  - biology
+  - chemistry
+  - astronomy
+  - cosmology
+  - history
+  - philosophy
+  - biography
+  - memoir
+  - economics
+  - psychology
+  - neuroscience
+  - anthropology
+  - sociology
+  - politics
+  - nature
+  - evolution
+  - quantum
+  - genetics
+  - war
+  - empire
+  - civilization
+  - universe
+  - brain
+  - mind
+  - theory
+  - discovery
+  - true story
+  - how to
+  - guide to
+  - secret
+  - einstein
+  - darwin
+  - feynman
+  - hawking
+  - sagan
+  - dna
+  - planet
+  - earth
+  - space
+  - time
+  - relativity
+  - algorithm
+  - artificial intelligence
+  - machine learning
+  - statistics
+  - code
+  - cryptography
   exclude_keywords:
-    - romantasy
-    - vampire
-    - werewolf
-    - dragon
-    - magic
-    - witch
-    - wizard
-    - sorcerer
-    - demon
-    - necromancer
-    - exorcist
-    - fae
-    - fairy
-    - shifter
-    - mage
-  
+  - romantasy
+  - vampire
+  - werewolf
+  - dragon
+  - magic
+  - witch
+  - wizard
+  - sorcerer
+  - demon
+  - necromancer
+  - exorcist
+  - fae
+  - fairy
+  - shifter
+  - mage
   tracked_authors: []
-
 scraping:
   request_delay: 2
   user_agents:
-    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+  - Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)
+    Chrome/124.0.0.0 Safari/537.36
+  - Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like
+    Gecko) Version/17.4 Safari/605.1.15
   max_books_per_source: 50
-
+  engine: lightpanda
+  lightpanda_bin: /tmp/lightpanda-spike/lightpanda
+  lightpanda_cookies: /tmp/lightpanda-cookies.json
+  lightpanda_wait_ms: 6000
 covers:
   enabled: true
   max_count: 10
-  dir: "data/covers"
+  dir: data/covers

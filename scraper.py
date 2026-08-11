@@ -11,7 +11,9 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from curl_cffi import requests as cffi_requests
 from sources.amazon import AmazonDealsScraper
+from sources.lightpanda_fetcher import LightpandaFetcher
 from filters import BookFilter
 from formatter import format_report, format_empty_report
 from storage import Storage
@@ -26,14 +28,24 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
-def download_cover(scraper: AmazonDealsScraper, cover_url: str, asin: str, covers_dir: Path) -> str | None:
-    """Download a cover image and return the absolute local path, or None on failure."""
+def make_scraper(config: dict) -> AmazonDealsScraper:
+    """Build the scraper with the configured engine (lightpanda or curl_cffi)."""
+    engine = config.get("scraping", {}).get("engine", "curl_cffi")
+    if engine == "lightpanda":
+        print(f"  ⚡ Engine: Lightpanda browser", file=sys.stderr)
+        return AmazonDealsScraper(config, fetcher=LightpandaFetcher(config))
+    print(f"  🔌 Engine: curl_cffi", file=sys.stderr)
+    return AmazonDealsScraper(config)
+
+
+def download_cover(cover_url: str, asin: str, covers_dir: Path) -> str | None:
+    """Download a cover image via curl_cffi (images don't need JS rendering)."""
     if not cover_url or not asin:
         return None
     try:
         covers_dir.mkdir(parents=True, exist_ok=True)
         dest = covers_dir / f"{asin}.jpg"
-        resp = scraper.session.get(cover_url, timeout=15, impersonate="chrome124")
+        resp = cffi_requests.get(cover_url, timeout=15, impersonate="chrome124")
         resp.raise_for_status()
         dest.write_bytes(resp.content)
         return str(dest.resolve())
@@ -43,7 +55,6 @@ def download_cover(scraper: AmazonDealsScraper, cover_url: str, asin: str, cover
 
 
 def cleanup_old_covers(covers_dir: Path, days: int = 7) -> None:
-    """Remove cover images older than `days` to avoid disk bloat."""
     if not covers_dir.exists():
         return
     cutoff = time.time() - (days * 86400)
@@ -66,24 +77,23 @@ def main() -> None:
     covers_dir = PROJECT_ROOT / covers_cfg.get("dir", "data/covers")
     max_covers = covers_cfg.get("max_count", 10)
 
-    # Clean old covers at start
     cleanup_old_covers(covers_dir)
 
     # --- Scrape ---
     print("🔍 Scraping Amazon Kindle SFF deals...", file=sys.stderr)
-    scraper = AmazonDealsScraper(config)
+    scraper = make_scraper(config)
     all_books = scraper.scrape_all()
     print(f"  Deal books scraped: {len(all_books)}", file=sys.stderr)
 
-    # Also scrape Best Sellers for trending books
+    # Best Sellers — batch fetch + parse
     print("🔍 Scraping Amazon Best Sellers...", file=sys.stderr)
     amz = config["sources"]["amazon"]
-    # Find best seller URLs from config (keys containing 'best_sellers')
     bs_keys = [k for k in amz if "best_sellers" in k]
     for bs_key in bs_keys:
         bs_url = scraper.base_url + amz[bs_key]
         try:
-            bs_books = scraper.scrape_best_sellers(bs_url)
+            bs_soup = scraper.prefetch([bs_url]).get(bs_url)
+            bs_books = scraper.parse_best_sellers(bs_soup)
             print(f"  {bs_key}: {len(bs_books)} books", file=sys.stderr)
             existing_asins = {b["asin"] for b in all_books if b.get("asin")}
             for book in bs_books:
@@ -92,7 +102,6 @@ def main() -> None:
                     all_books.append(book)
         except Exception as e:
             print(f"  [WARN] {bs_key} failed: {e}", file=sys.stderr)
-
     print(f"  Total combined: {len(all_books)} books", file=sys.stderr)
 
     if not all_books:
@@ -104,50 +113,26 @@ def main() -> None:
     filtered = book_filter.apply(all_books)
     print(f"  After filtering: {len(filtered)} books", file=sys.stderr)
 
-    # --- Enrich with accurate product-page prices ---
-    # Deal page prices can differ from the actual product page (KU vs buy price,
-    # region-specific deals, dynamic pricing). Visit each product page for the
-    # real apex-pricetopay price.
-    print("💰 Fetching accurate product-page prices...", file=sys.stderr)
+    # --- Enrich: batch-fetch all product pages, parse once ---
+    print("💰 Fetching accurate product-page prices (batch)...", file=sys.stderr)
+    product_urls = [b["url"] for b in filtered if b.get("url")]
+    soups = scraper.prefetch(product_urls)
     for book in filtered:
-        if not book.get("url"):
+        soup = soups.get(book.get("url", ""))
+        if not soup:
             continue
-        try:
-            soup = scraper.fetch_html(book["url"])
-            if soup:
-                # Apex price-to-pay (the actual current buy-box price)
-                apex = soup.select_one('.apex-pricetopay-value .a-offscreen')
-                if apex and apex.text.strip():
-                    real_price = scraper._clean_price(apex.text.strip())
-                    if real_price is not None and real_price > 0:
-                        old = book.get("price")
-                        book["price"] = real_price
-                        if old != real_price:
-                            print(f"  💵 {book['title'][:50]}... ${old} → ${real_price}", file=sys.stderr)
-
-                # List price (the regular/print price before discount)
-                basis = soup.select_one('.apex-basisprice-value .a-offscreen')
-                if basis and basis.text.strip():
-                    list_price = scraper._clean_price(basis.text.strip())
-                    if list_price and list_price > 0:
-                        book["list_price"] = list_price
-
-                # Savings percentage
-                savings_el = soup.select_one('.apex-savings-percentage')
-                if savings_el:
-                    savings_text = savings_el.text.strip()
-                    # e.g. "-90%" → 90
-                    import re as savings_re
-                    pct = savings_re.search(r'(\d+)%', savings_text)
-                    if pct:
-                        book["savings_pct"] = int(pct.group(1))
-
-                # Extract cover URL from product page
-                cover_url = scraper.extract_cover_url(soup)
-                if cover_url:
-                    book["cover_url"] = cover_url
-        except Exception:
-            pass  # keep original price if product page fails
+        info = scraper.parse_product_page(soup)
+        if info.get("price"):
+            old = book.get("price")
+            book["price"] = info["price"]
+            if old != info["price"]:
+                print(f"  💵 {book['title'][:50]}... ${old} → ${info['price']}", file=sys.stderr)
+        if info.get("list_price"):
+            book["list_price"] = info["list_price"]
+        if info.get("savings_pct"):
+            book["savings_pct"] = info["savings_pct"]
+        if info.get("cover_url"):
+            book["cover_url"] = info["cover_url"]
 
     # Re-filter with accurate prices (some may now exceed max_price)
     filtered = book_filter.apply(filtered)
@@ -157,28 +142,25 @@ def main() -> None:
     new_count = 0
     dropped_count = 0
     report_books = []
-    
+
     for book in filtered:
         asin = book.get("asin", "")
         title = book.get("title", "")
         author = book.get("author", "")
         price = book.get("price")
         url = book.get("url", "")
-        
+
         if not asin or not title:
             continue
-        
+
         is_new = storage.is_new(asin)
         better_price = storage.is_better_price(asin, price or 999.99)
-        
-        # Tag tracked authors for promotion in report
+
         if book_filter.is_tracked_author(author):
             book["tracked_author"] = True
-        
-        # Always include in the daily report
+
         report_books.append(book)
-        
-        # Track in storage: mark as seen, detect new/price-drop for stats
+
         if is_new:
             new_count += 1
             storage.mark_seen(asin, title, price or 0.0, author, url)
@@ -188,7 +170,6 @@ def main() -> None:
             storage.mark_seen(asin, title, price or 0.0, author, url)
             print(f"  📉 DROP: {title} (${price})", file=sys.stderr)
         else:
-            # Still update last_seen timestamp without changing price
             storage.mark_seen(asin, title, price or 0.0, author, url)
 
     # --- Download covers for reported books (capped) ---
@@ -197,7 +178,7 @@ def main() -> None:
             cover_url = book.get("cover_url")
             asin = book.get("asin", "")
             if cover_url and asin:
-                cover_path = download_cover(scraper, cover_url, asin, covers_dir)
+                cover_path = download_cover(cover_url, asin, covers_dir)
                 if cover_path:
                     book["cover_path"] = cover_path
     else:
