@@ -187,3 +187,49 @@ class TestMixedBatch:
             fic_book(asin="B0T3", title="Dungeon Crawler Carl Book 4"),
         ]
         assert len(bf.apply(batch)) == 0
+
+
+# ─── Author extraction on deal cards (regression: B004OVEYNU) ───────
+
+class TestAuthorExtraction:
+    def test_author_row_used_when_title_contains_by(self):
+        """Six Easy Pieces: '...Explained by Its Most Brilliant Teacher by
+        Richard P. Feynman...' — the full-card regex used to grab the 'by'
+        inside the title, mangling the author. The author row must be used."""
+        from sources.amazon import AmazonDealsScraper
+        from bs4 import BeautifulSoup
+
+        html = '''
+        <div data-asin="B004OVEYNU">
+          <h2><a><span>Six Easy Pieces: Essentials of Physics Explained by Its Most Brilliant Teacher</span></a></h2>
+          <div class="a-row a-color-secondary">by Richard P. Feynman , Robert B. Leighton , et al. | Sold by: Hachette Book Group | Mar 22, 2011</div>
+          <span class="a-offscreen">$1.99</span>
+        </div>
+        '''
+        cfg = {"sources": {"amazon": {"base_url": "https://www.amazon.com", "deals_x": "/x"}},
+               "scraping": {"max_books_per_source": 50}}
+        scraper = AmazonDealsScraper(cfg)
+        books = scraper.parse_deals_page(BeautifulSoup(html, "lxml"))
+        assert len(books) == 1
+        assert books[0]["asin"] == "B004OVEYNU"
+        assert books[0]["author"] == "Richard P. Feynman , Robert B. Leighton , et al."
+        assert "Its Most Brilliant Teacher" not in books[0]["author"]
+
+    def test_fallback_regex_still_works_without_author_row(self):
+        from sources.amazon import AmazonDealsScraper
+        from bs4 import BeautifulSoup
+
+        html = '''
+        <div data-asin="B0TESTAA1">
+          <h2><a><span>Some Book</span></a></h2>
+          by Jane Doe | Sold by: Amazon.com Services LLC
+          <span class="a-offscreen">$2.99</span>
+        </div>
+        '''
+        cfg = {"sources": {"amazon": {"base_url": "https://www.amazon.com", "deals_x": "/x"}},
+               "scraping": {"max_books_per_source": 50}}
+        scraper = AmazonDealsScraper(cfg)
+        books = scraper.parse_deals_page(BeautifulSoup(html, "lxml"))
+        assert len(books) == 1
+        assert books[0]["author"] == "Jane Doe"
+        assert books[0]["price"] == 2.99

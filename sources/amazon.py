@@ -144,9 +144,23 @@ class AmazonDealsScraper:
 
             author = ""
             raw_text = card.get_text(" ", strip=True)
-            author_match = re.search(r"by\s+([^|]+?)(?:\s*\|\s*Sold by)", raw_text)
-            if author_match:
-                author = author_match.group(1).strip()
+            # Prefer the author row DOM: div.a-row.a-color-secondary contains
+            # "by <Author> | Sold by: <Publisher> ...". Regex over the FULL card
+            # text grabs the FIRST "by", which can be inside the title itself
+            # (e.g. "...Explained by Its Most Brilliant Teacher"), mangling the
+            # author. Restricting the search to the author row avoids that.
+            author_row = card.select_one('div.a-row.a-color-secondary')
+            if author_row:
+                row_text = author_row.get_text(" ", strip=True)
+                author_match = re.search(
+                    r"by\s+([^|]+?)(?:\s*\|\s*Sold by)", row_text, re.IGNORECASE
+                )
+                if author_match:
+                    author = author_match.group(1).strip()
+            if not author:
+                author_match = re.search(r"by\s+([^|]+?)(?:\s*\|\s*Sold by)", raw_text)
+                if author_match:
+                    author = author_match.group(1).strip()
 
             price = None
             buy_match = re.search(r"Or\s+\$?(\d+\.?\d*)\s+to\s+buy", raw_text, re.IGNORECASE)
