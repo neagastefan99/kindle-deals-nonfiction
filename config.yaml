@@ -165,7 +165,7 @@ scraping:
   max_books_per_source: 50
   engine: lightpanda
   auto_fallback: true
-  lightpanda_bin: /tmp/lightpanda-spike/lightpanda
+  lightpanda_bin: /home/stefan/.local/bin/lightpanda
   lightpanda_cookies: /tmp/lightpanda-cookies.json
   lightpanda_wait_ms: 6000
 covers:

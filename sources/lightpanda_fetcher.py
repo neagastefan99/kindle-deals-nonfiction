@@ -6,7 +6,7 @@ batch (~3s for 3 pages, ~5s for 10 product pages vs 25-30s with curl_cffi).
 
 Requires: lightpanda binary on PATH or configured via config:
   scraping:
-    lightpanda_bin: /tmp/lightpanda-spike/lightpanda
+    lightpanda_bin: /home/stefan/.local/bin/lightpanda
 """
 
 import json
@@ -33,7 +33,7 @@ class LightpandaFetcher:
     def __init__(self, config: dict[str, Any]):
         self.scraping_cfg = config.get("scraping", {})
         self.bin = self.scraping_cfg.get(
-            "lightpanda_bin", "/tmp/lightpanda-spike/lightpanda"
+            "lightpanda_bin", "/home/stefan/.local/bin/lightpanda"
         )
         self.wait_ms = self.scraping_cfg.get("lightpanda_wait_ms", 6000)
         self.cookie_path = Path(self.scraping_cfg.get(
