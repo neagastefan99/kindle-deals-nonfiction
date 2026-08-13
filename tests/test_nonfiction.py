@@ -233,3 +233,32 @@ class TestAuthorExtraction:
         assert len(books) == 1
         assert books[0]["author"] == "Jane Doe"
         assert books[0]["price"] == 2.99
+
+
+# ─── Storage metadata refresh (regression: stale mangled author) ────
+
+class TestStorageRefresh:
+    def test_mark_seen_refreshes_title_author_url(self, tmp_path):
+        """A previously-seen ASIN with a mangled author must be corrected on
+        the next run (parser fixes propagate into seen_books.json)."""
+        from storage import Storage
+
+        st = Storage(tmp_path)
+        st.mark_seen("B004OVEYNU", "Old title", 1.99, "Its Most Brilliant Teacher by Richard P. Feynman", "http://old")
+        st.mark_seen("B004OVEYNU", "Six Easy Pieces: Essentials of Physics Explained by Its Most Brilliant Teacher", 1.99,
+                     "Richard P. Feynman , Robert B. Leighton , et al.", "https://www.amazon.com/dp/B004OVEYNU")
+
+        seen = st._read_seen()
+        entry = seen["B004OVEYNU"]
+        assert entry["title"] == "Six Easy Pieces: Essentials of Physics Explained by Its Most Brilliant Teacher"
+        assert entry["author"] == "Richard P. Feynman , Robert B. Leighton , et al."
+        assert entry["url"] == "https://www.amazon.com/dp/B004OVEYNU"
+        assert entry["lowest_price"] == 1.99
+
+    def test_mark_seen_keeps_lowest_price(self, tmp_path):
+        from storage import Storage
+
+        st = Storage(tmp_path)
+        st.mark_seen("B0X", "Book", 0.99)
+        st.mark_seen("B0X", "Book", 4.99)
+        assert st._read_seen()["B0X"]["lowest_price"] == 0.99

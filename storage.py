@@ -44,6 +44,15 @@ class Storage:
         if asin in seen:
             entry = seen[asin]
             entry["last_seen"] = now
+            # Refresh metadata: parser fixes can correct earlier mangled
+            # title/author/url values (e.g. author regex grabbed 'by' from
+            # the title). Only update non-empty new values.
+            if title:
+                entry["title"] = title
+            if author:
+                entry["author"] = author
+            if url:
+                entry["url"] = url
             if price < entry.get("lowest_price", float("inf")):
                 entry["lowest_price"] = price
                 entry["price_dropped_on"] = now
