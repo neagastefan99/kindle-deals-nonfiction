@@ -501,3 +501,84 @@ class TestLightpanda503Retry:
         captured = capsys.readouterr()
         assert "partial failure: 1/2" in captured.out
         assert "HTTP 503" in captured.out
+
+
+# ─── Edition guard: only Kindle ebook ASINs (t_663bdb53) ────────────
+
+class TestEditionGuard:
+    """Only report ASINs that resolve to the KINDLE ebook edition.
+
+    parse_product_page must set is_ebook=True only when #tmmSwatches has a
+    Kindle row WITH a price. Print/audiobook-only listings (no Kindle row,
+    or a Kindle row without a price) → is_ebook=False so scraper.py drops
+    them. No swatch block → unknown (is_ebook unset, book kept).
+    """
+
+    KINDLE_ROW = (
+        '<div class="swatchElement selected" id="tmm-grid-swatch-KINDLE">'
+        '<span class="a-button"><span class="a-button-inner"><a class="a-button-text">'
+        '<span class="slot-title"><span aria-label="Kindle Format:">Kindle</span><br/></span>'
+        '<span class="slot-price"><span aria-label="$1.99" class="ebook-price-value">$1.99</span></span>'
+        '<span class="slot-extraMessage"><span class="kindleExtraMessage">'
+        '<span aria-label="Available instantly">Available instantly</span></span></span>'
+        '</a></span></span></div>'
+    )
+    PRINT_ROW = (
+        '<div class="swatchElement unselected" id="tmm-grid-swatch-PAPERBACK">'
+        '<span class="a-button"><span class="a-button-inner"><a class="a-button-text">'
+        '<span class="slot-title"><span aria-label="Paperback Format:">Paperback</span></span>'
+        '<span class="slot-price"><span aria-label="$8.94">$8.94</span></span>'
+        '</a></span></span></div>'
+    )
+    HARDCOVER_ROW = PRINT_ROW.replace("PAPERBACK", "HARDCOVER").replace("Paperback", "Hardcover").replace("$8.94", "$11.71")
+    AUDIO_ROW = (
+        '<div class="swatchElement unselected" id="tmm-grid-swatch-AUDIO_DOWNLOAD">'
+        '<span class="a-button"><span class="a-button-inner"><a class="a-button-text">'
+        '<span class="slot-title"><span>Audiobook</span></span>'
+        '<span class="slot-price"><span>$0.00</span></span>'
+        '</a></span></span></div>'
+    )
+
+    def _scraper(self):
+        from sources.amazon import AmazonDealsScraper
+        cfg = {"sources": {"amazon": {
+            "base_url": "https://www.amazon.com",
+            "deals_today": "/x",
+        }}, "scraping": {"max_books_per_source": 50}}
+        return AmazonDealsScraper(cfg)
+
+    def _info(self, body: str) -> dict:
+        from bs4 import BeautifulSoup
+        return self._scraper().parse_product_page(
+            BeautifulSoup(f"<html><body>{body}</body></html>", "lxml"))
+
+    def test_kindle_row_with_price_is_ebook(self):
+        info = self._info(f'<div id="tmmSwatches"><ul>{self.KINDLE_ROW}{self.AUDIO_ROW}{self.HARDCOVER_ROW}{self.PRINT_ROW}</ul></div>')
+        assert info.get("is_ebook") is True
+
+    def test_print_audio_only_no_kindle_row_is_not_ebook(self):
+        # Only print/audio rows → the ASIN is NOT the Kindle ebook edition
+        info = self._info(f'<div id="tmmSwatches"><ul>{self.AUDIO_ROW}{self.HARDCOVER_ROW}{self.PRINT_ROW}</ul></div>')
+        assert info.get("is_ebook") is False
+
+    def test_kindle_row_without_price_is_not_ebook(self):
+        # Kindle row exists but carries no price (e.g. currently unavailable)
+        kindle_no_price = self.KINDLE_ROW.replace(
+            '<span class="slot-price"><span aria-label="$1.99" class="ebook-price-value">$1.99</span></span>',
+            '<span class="slot-extraMessage"><span class="kindleExtraMessage"><span>Currently unavailable</span></span></span>')
+        info = self._info(f'<div id="tmmSwatches"><ul>{kindle_no_price}{self.PRINT_ROW}</ul></div>')
+        assert info.get("is_ebook") is False
+
+    def test_no_swatch_block_is_unknown(self):
+        # No #tmmSwatches/#formats → cannot verify → is_ebook unset → keep
+        info = self._info('<div class="a-section"><span class="apex-pricetopay-value">$ 1 . 99</span></div>')
+        assert "is_ebook" not in info
+
+    def test_old_layout_li_rows_with_tmm_ebooks(self):
+        # Legacy layout: <li> rows, Kindle button id tmm-ebooks
+        old = ('<ul>'
+               '<li><span class="a-button" id="tmm-ebooks"><span class="a-button-text">Kindle $1.99 Available instantly</span></span></li>'
+               '<li><span class="a-button" id="tmm_pap_swatch_0"><span class="a-button-text">Paperback $8.94</span></span></li>'
+               '</ul>')
+        info = self._info(f'<div id="tmmSwatches">{old}</div>')
+        assert info.get("is_ebook") is True
