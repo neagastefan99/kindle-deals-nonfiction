@@ -159,7 +159,7 @@ filters:
   - dark lord
   tracked_authors: []
 scraping:
-  request_delay: 2
+  request_delay: 4  # 4s + jitter = 2-6s — raised from 2s to dodge Amazon 503 rate-limit
   user_agents:
   - Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)
     Chrome/124.0.0.0 Safari/537.36
