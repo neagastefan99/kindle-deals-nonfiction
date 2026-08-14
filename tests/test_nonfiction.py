@@ -301,9 +301,11 @@ class _FakeFetcher:
         self._results = results
         self.last_failures = failures or {}
         self.calls = 0
+        self.last_urls: list[str] = []
 
     def fetch_all(self, urls):
         self.calls += 1
+        self.last_urls = list(urls)
         return dict(self._results)
 
 
@@ -375,7 +377,7 @@ class TestLightpanda503Retry:
         assert "1 URL(s) failed" in captured.out
         assert "503" in captured.out
 
-    def test_no_fallback_on_partial_success(self, config):
+    def test_no_fallback_on_partial_success(self, config, capsys):
         from sources.fallback_fetcher import FallbackFetcher
         from bs4 import BeautifulSoup
         u1 = "https://www.amazon.com/dp/B0TEST00001"
@@ -385,5 +387,11 @@ class TestLightpanda503Retry:
         fallback = _FakeFetcher({u1: soup, u2: soup})
         ff = FallbackFetcher(primary, fallback, config)
         out = ff.fetch_all([u1, u2])
-        assert fallback.calls == 0          # partial success → no curl_cffi fallback
-        assert out[u1] is not None and out[u2] is None
+        # Partial failure → fallback runs ONLY for the failed URL, good
+        # results are kept, and the 503 is logged.
+        assert fallback.calls == 1
+        assert fallback.last_urls == [u2]   # only the failed URL is retried
+        assert out[u1] is not None and out[u2] is not None
+        captured = capsys.readouterr()
+        assert "partial failure: 1/2" in captured.out
+        assert "HTTP 503" in captured.out
