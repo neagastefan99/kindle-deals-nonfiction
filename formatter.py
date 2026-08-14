@@ -43,7 +43,7 @@ def _format_book_entry(book: dict[str, Any]) -> str:
 
 
 def format_report(books: list[dict[str, Any]], new_count: int, 
-                  dropped_count: int) -> str:
+                  dropped_count: int, region_warning: str | None = None) -> str:
     """Format the daily deals report with tracked authors section first."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     
@@ -54,6 +54,8 @@ def format_report(books: list[dict[str, Any]], new_count: int,
     
     if not books:
         lines.append("No Fantasy or Sci\\-Fi deals found today\\.")
+        lines.append("_Only books with a verified ebook\\-list discount are shown — "
+                     "unverifiable list prices are never claimed\\._")
         lines.append("")
         lines.append(f"_📊 Stats: {new_count} new, {dropped_count} price drops today_")
         return "\n".join(lines)
@@ -84,6 +86,14 @@ def format_report(books: list[dict[str, Any]], new_count: int,
         lines.append("")
     
     lines.append("")
+    # Region warning (t_13047664): if the fetches resolved to a non-US
+    # storefront, say so prominently — the prices are for THAT marketplace,
+    # not the one the user's browser shows.
+    if region_warning:
+        lines.append(f"⚠️ *Region warning:* enrichment pages resolved to "
+                     f"{region_warning} \\- prices are NOT the US storefront "
+                     f"the bot targets\\.")
+        lines.append("")
     # Region disclaimer (t_f893b2c1): prices are verified LIVE on the US
     # Amazon storefront at fetch time; Amazon serves region-specific prices,
     # so what the user's browser shows (EU/other) may differ.

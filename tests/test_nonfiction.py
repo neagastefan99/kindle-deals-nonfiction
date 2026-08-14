@@ -700,19 +700,42 @@ class TestListPriceBasis:
         assert info["savings_pct"] == 80
 
     def test_print_list_fallback_when_no_kindle_list(self):
-        # No Kindle-specific list on the page → fall back to apex basis.
+        # No Kindle-specific list on the page → NO list price is claimed
+        # (t_13047664). apex-basisprice-value is the PRINT list price; using
+        # it as the savings basis inflated Shards of Earth to "90% off" when
+        # the ebook's own Digital List Price is $5.00. Without an ebook list
+        # price, savings_pct stays unset and the require_discount gate drops
+        # the book — never a print-list-based savings claim.
         body = (
             '<div id="tmmSwatches">'
             '<div class="swatchElement" id="tmm-grid-swatch-KINDLE">'
             '<span class="a-button-text">Kindle $1.99 Available instantly</span>'
             '</div></div>'
             '<span class="apex-pricetopay-value">$ 1 . 99</span>'
-            '<span class="apex-basisprice-value">$12.99 $12.99</span>'
+            '<span class="apex-basisprice-value">$19.99 $19.99</span>'
         )
         info = self._info(body)
         assert info["price"] == 1.99
-        assert info["list_price"] == 12.99         # fallback
-        assert info["savings_pct"] == 85           # round((1-1.99/12.99)*100)
+        assert "list_price" not in info          # print list NOT used
+        assert "savings_pct" not in info         # no unverifiable savings claim
+
+    def test_list_price_from_kindle_row_still_works(self):
+        # When the page DOES expose the ebook's own list (struck-through in
+        # the Kindle row), savings is computed from it.
+        body = (
+            '<div id="tmmSwatches">'
+            '<div class="swatchElement" id="tmm-grid-swatch-KINDLE">'
+            '<span class="a-button-text">Kindle '
+            '<span class="a-price a-text-price" data-a-strike="true"><span class="a-offscreen">$5.00</span>$5.00</span> '
+            '$1.99 Available instantly</span>'
+            '</div></div>'
+            '<span class="apex-pricetopay-value">$ 1 . 99</span>'
+            '<span class="apex-basisprice-value">$19.99 $19.99</span>'
+        )
+        info = self._info(body)
+        assert info["price"] == 1.99
+        assert info["list_price"] == 5.00
+        assert info["savings_pct"] == 60           # round((1-1.99/5.00)*100)
 
     def test_apex_savings_percentage_ignored(self):
         # apex-savings-percentage (85%, vs PRINT list) must be ignored even
@@ -1126,3 +1149,92 @@ class TestEnrichHardRule:
         out = enrich_books([book], soups, self._scraper())
         assert len(out) == 1
         assert out[0]["price"] == 1.99     # live product-page price wins
+        assert out[0].get("price_source") == "kindle_row"
+
+    def test_print_list_only_page_kept_price_but_no_savings(self, capsys):
+        """Regression (t_13047664): a page exposing ONLY the PRINT list
+        (apex-basisprice-value) must NOT claim savings from it. enrich keeps
+        the verified price but leaves list_price/savings_pct unset so the
+        require_discount gate drops the book instead of reporting an
+        inflated print-list-based discount."""
+        from scraper import enrich_books
+        book = nf_book(url="https://www.amazon.com/dp/B0TEST00001", price=0.99)
+        body = (
+            '<div id="tmmSwatches">'
+            '<div class="swatchElement" id="tmm-grid-swatch-KINDLE">'
+            '<span class="a-button-text">Kindle $1.99 Available instantly</span>'
+            '</div></div>'
+            '<span class="apex-pricetopay-value">$ 1 . 99</span>'
+            '<span class="apex-basisprice-value">$19.99 $19.99</span>'
+        )
+        soups = {"https://www.amazon.com/dp/B0TEST00001": self._soup(body)}
+        out = enrich_books([book], soups, self._scraper())
+        assert len(out) == 1
+        assert out[0]["price"] == 1.99
+        assert "list_price" not in out[0]
+        assert "savings_pct" not in out[0]
+
+
+# ─── Region detection (t_13047664) ─────────────────────────────────
+
+class TestRegionDetection:
+    def test_us_page_detected(self):
+        from scraper import detect_region
+        region, evidence = detect_region("<html>$1.99 Print List Price: $19.99</html>")
+        assert region == "US"
+
+    def test_eur_page_detected(self):
+        from scraper import detect_region
+        region, evidence = detect_region("<html>€3,66 Digital List Price: 5,00 €</html>")
+        assert region == "non-US"
+        assert "EUR" in evidence
+
+    def test_amazon_de_page_detected(self):
+        from scraper import detect_region
+        # A page actually SERVED by the German marketplace carries EUR
+        # currency JSON even when the footer text mentions amazon.de.
+        region, _ = detect_region('<html>"currencyCode": "EUR" amazon.de</html>')
+        assert region == "non-US"
+
+    def test_footer_marketplace_list_not_false_positive(self):
+        from scraper import detect_region
+        # US pages list every marketplace in the footer; a bare amazon.de
+        # mention must NOT flag the page as non-US (t_13047664).
+        region, _ = detect_region(
+            '<html>"currencyCode": "USD" $1.99 '
+            '"amazon.ca","amazon.co.uk","amazon.de","amazon.fr"</html>')
+        assert region == "US"
+
+    def test_empty_page_unknown(self):
+        from scraper import detect_region
+        region, _ = detect_region("")
+        assert region == "unknown"
+
+    def test_robot_page_unknown(self):
+        from scraper import detect_region
+        region, _ = detect_region("<html>Amazon.com</html>")
+        assert region == "unknown"
+
+
+# ─── Robot-check detection in curl_cffi (t_13047664) ───────────────
+
+class TestRobotCheckDetection:
+    def test_robot_check_signature_detected(self):
+        from sources.base import BaseScraper
+        assert BaseScraper._is_robot_check(
+            "<html><body>Amazon.com Robot Check</body></html>") is True
+
+    def test_captcha_signature_detected(self):
+        from sources.base import BaseScraper
+        assert BaseScraper._is_robot_check(
+            "<form action='/errors_page/validateCaptcha'>") is True
+
+    def test_large_real_page_not_robot_check(self):
+        from sources.base import BaseScraper
+        big = "<html>" + ("<div data-asin='X'>book $1.99</div>" * 5000) + "</html>"
+        assert BaseScraper._is_robot_check(big) is False
+
+    def test_robot_check_reason_named(self):
+        from sources.base import BaseScraper
+        assert "captcha" in BaseScraper._robot_check_reason(
+            "Click the button below to continue shopping")

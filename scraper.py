@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Kindle Deals Bot — scrapes Amazon SFF deals and prints a Markdown report."""
 
+import re
 import sys
 import time
 from pathlib import Path
@@ -70,35 +71,58 @@ def enrich_books(filtered: list[dict], soups: dict, scraper: AmazonDealsScraper)
     yields a price. Everything else (missing page, unparseable page, no
     price on the page) is dropped with a reason — the possibly-stale
     deal-listing price is never carried into the report.
+
+    Instrumentation (t_13047664): every book gets a one-line trace showing
+    the enrichment result, the SELECTOR that produced the price, and whether
+    the (rejected) print-list fallback was the only list source. A book whose
+    page exposes no EBOOK list price is kept only if its price is confirmed —
+    but without an ebook list price we can no longer compute a savings %,
+    so the BookBub require_discount gate drops it later (never a print-list-
+    based savings claim).
     """
     enriched = []
     for book in filtered:
-        soup = soups.get(book.get("url", ""))
+        title = book.get("title", "")[:50]
+        url = book.get("url", "")
+        soup = soups.get(url)
         if not soup:
             # (e) failed enrichment → DROP (never keep the stale deal-feed price)
-            print(f"  🚫 DROP (no product page): {book['title'][:50]}", file=sys.stderr)
+            print(f"  🚫 DROP (no product page): {title}", file=sys.stderr)
             continue
         info = scraper.parse_product_page(soup)
         if info.get("is_ebook") is False:
             # Edition guard (§6c): ASIN is NOT the Kindle ebook edition
             # (print/audiobook-only listing) — drop, don't report its price.
             book["is_ebook"] = False
+            print(f"  🚫 DROP (non-Kindle edition): {title}", file=sys.stderr)
             continue
         if not info.get("price"):
             # (e) ambiguous enrichment: no confirmed live price → DROP
-            print(f"  🚫 DROP (no live price): {book['title'][:50]}", file=sys.stderr)
+            print(f"  🚫 DROP (no live price): {title}", file=sys.stderr)
             continue
         book["price"] = info["price"]
+        book["price_source"] = info.get("price_source", "unknown")
         if info.get("list_price"):
             book["list_price"] = info["list_price"]
+            book["list_source"] = info.get("list_source", "unknown")
+        else:
+            book.pop("list_price", None)
+            book.pop("list_source", None)
         if info.get("savings_pct") is not None:
             book["savings_pct"] = info["savings_pct"]
+        else:
+            book.pop("savings_pct", None)
         if info.get("cover_url"):
             book["cover_url"] = info["cover_url"]
         if "available" in info:
             book["available"] = info["available"]
         if info.get("preorder"):
             book["preorder"] = True
+        # Instrumentation: price + which selector produced it + list basis.
+        list_txt = (f"list=${book.get('list_price'):.2f} "
+                    f"(src={book.get('list_source')})") if book.get("list_price") else "NO ebook list price"
+        print(f"  ✅ {title} → ${book['price']:.2f} (src={book.get('price_source')}) "
+              f"{list_txt} sav={book.get('savings_pct')}%", file=sys.stderr)
         enriched.append(book)
     return enriched
 
@@ -136,6 +160,46 @@ def is_reportable(book: dict) -> bool:
     page says the Kindle edition is currently unavailable or is a pre-order
     (not buyable/instantly downloadable right now). Unknown → keep."""
     return book.get("available", True) is not False and not book.get("preorder", False)
+
+
+# ─── Region detection (t_13047664) ─────────────────────────────────
+# The bot forces the US storefront via cookies (session-id 130-…, lc-acbuk
+# en_US, i18n-prefs USD). The user's own account may resolve to a different
+# region (observed: user's browser session-id 131-…, EU), where Amazon serves
+# different prices (Shards of Earth: $1.99 US vs $3.66 user's view) and a
+# different list price (Print List $19.99 vs Digital List $5.00). Detect
+# obvious non-US markers in fetched pages and warn loudly so the report is
+# read with the right expectations.
+#
+# Signals, in priority order: the page's own currency JSON (`"currencyCode":
+# "EUR"` — the most reliable marker, present on every Amazon page), then
+# currency symbols (€/£) in visible price text. Marketplace strings like
+# "amazon.de" are deliberately NOT used — every US page footer lists all
+# marketplaces, so they false-positive on perfectly normal US fetches.
+REGION_NON_US_MARKERS = [
+    (r'"currencyCode"\s*:\s*"EUR"', "EUR currency"),
+    (r'"currencyCode"\s*:\s*"GBP"', "GBP currency"),
+    (r'"currencyCode"\s*:\s*"RON"', "RON currency"),
+    (r'"currencyCode"\s*:\s*"BRL"', "BRL currency"),
+    (r'"currencyCode"\s*:\s*"INR"', "INR currency"),
+    (re.escape("€"), "EUR pricing"),
+    (re.escape("&euro;"), "EUR pricing"),
+    (re.escape("£"), "GBP pricing"),
+]
+
+
+def detect_region(html: str) -> tuple[str, str]:
+    """Return (region, evidence). 'US' when the page carries USD/`$` pricing
+    with no non-US marker; 'non-US' when an EU/other marker is found;
+    'unknown' when we can't tell (e.g. tiny robot-check page)."""
+    if not html or not html.strip():
+        return "unknown", "empty page"
+    for marker, label in REGION_NON_US_MARKERS:
+        if re.search(marker, html):
+            return "non-US", label
+    if "$" in html:
+        return "US", "USD pricing"
+    return "unknown", "no currency marker"
 
 
 def main() -> None:
@@ -197,6 +261,24 @@ def main() -> None:
         soups = enrichment_fetcher.fetch_all(product_urls)
     else:
         soups = scraper.prefetch(product_urls)  # lightpanda + curl_cffi fallback
+
+    # Region check (t_13047664): confirm the fetches resolved to the US
+    # storefront (USD), so the prices in the report match what the bot
+    # claims. A non-US resolution means every price in this report is for a
+    # different marketplace than the user's browser shows — warn loudly.
+    region_warning = None
+    for soup in soups.values():
+        if soup is None:
+            continue
+        region, evidence = detect_region(str(soup))
+        if region == "non-US":
+            region_warning = evidence
+            break
+    if region_warning:
+        print(f"  ⚠️ REGION WARNING: enrichment pages resolved to {region_warning} — "
+              f"prices may differ from the US storefront the user sees!",
+              file=sys.stderr)
+
     filtered = enrich_books(filtered, soups, scraper)
     dropped_enrich = len(product_urls) - len(filtered)
     if dropped_enrich:
@@ -219,8 +301,17 @@ def main() -> None:
 
     # Re-filter with accurate prices (some may now exceed max_price)
     # and the BookBub limited-time gate (only real >=50% discounts).
+    # NOTE (t_13047664): savings_pct is only set when the product page
+    # exposed the EBOOK's own list price (Kindle row struck-through or a
+    # "Kindle Price / List Price" basis). Books whose page shows only the
+    # PRINT list (apex-basisprice-value) get NO savings_pct — the gate drops
+    # them here rather than reporting an inflated print-list-based savings.
+    gate_before = len(filtered)
     filtered = book_filter.apply(filtered, require_discount=True)
-    print(f"  After price enrichment: {len(filtered)} books", file=sys.stderr)
+    gate_dropped = gate_before - len(filtered)
+    print(f"  After price enrichment: {len(filtered)} books "
+          f"(gate dropped {gate_dropped}: over cap / <{book_filter.min_savings_pct}% "
+          f"off / no ebook list price on page)", file=sys.stderr)
 
     # --- Deduplicate & track ---
     new_count = 0
@@ -283,7 +374,7 @@ def main() -> None:
 
     # --- Format & output ---
     print(f"  Reporting: {new_count} new + {dropped_count} price drops", file=sys.stderr)
-    report = format_report(report_books, new_count, dropped_count)
+    report = format_report(report_books, new_count, dropped_count, region_warning=region_warning)
     print(report)
 
     # --- Log run ---

@@ -482,8 +482,10 @@ class AmazonDealsScraper:
         kindle_deal, kindle_list = self._kindle_row_prices(swatch_box)
         if kindle_deal is not None:
             info["price"] = kindle_deal
+            info["price_source"] = "kindle_row"
         if kindle_list is not None:
             info["list_price"] = kindle_list
+            info["list_source"] = "kindle_row"
 
         # Apex price-to-pay fallback: text like "$ 1 . 99" (Lightpanda leaves
         # .a-offscreen empty, skill documents .apex-pricetopay-value).
@@ -493,18 +495,22 @@ class AmazonDealsScraper:
                 price = self._clean_price(apex.get_text(" ", strip=True))
                 if price:
                     info["price"] = price
+                    info["price_source"] = "apex_pricetopay"
 
-        # List price fallback: a "Kindle Price" basis element, then the
-        # apex-basisprice-value (the PRINT list — imperfect, but the only
-        # remaining source when no Kindle-specific list is exposed).
+        # List price fallback: a "Kindle Price" basis element — the EBOOK's
+        # own list price (spike §6a). NOTE (t_13047664): apex-basisprice-value
+        # is the PRINT list price ("Print List Price: $19.99"), never the
+        # ebook's own Digital List Price. Using it as the savings basis
+        # inflated Shards of Earth to "90% off" when the real ebook list is
+        # $5.00 (~60% off). We therefore do NOT fall back to the print basis:
+        # if the page exposes no ebook-specific list price, list_price stays
+        # unset and the caller's require_discount gate drops the book rather
+        # than reporting an unverifiable savings %.
         if "list_price" not in info:
             basis_price = self._kindle_price_basis(soup)
-            if basis_price is None:
-                basis = soup.select_one('.apex-basisprice-value')
-                if basis:
-                    basis_price = self._clean_price(basis.get_text(" ", strip=True))
             if basis_price:
                 info["list_price"] = basis_price
+                info["list_source"] = "kindle_price_basis"
 
         # Savings (spike §6a): recompute from price/list_price ourselves.
         # apex-savings-percentage references the PRINT list price and is
