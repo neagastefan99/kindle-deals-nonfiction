@@ -582,3 +582,165 @@ class TestEditionGuard:
                '</ul>')
         info = self._info(f'<div id="tmmSwatches">{old}</div>')
         assert info.get("is_ebook") is True
+
+
+# ─── Storage: BookBub price gates (best-price 30d, anti-stale 14d) ──
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+
+@pytest.fixture
+def tmp_storage(tmp_path):
+    from storage import Storage
+    return Storage(tmp_path)
+
+
+def _date(days_ago: int) -> str:
+    """ISO date `days_ago` before today (UTC) — for price_history keys."""
+    return (datetime.now(timezone.utc).date() - timedelta(days=days_ago)).isoformat()
+
+
+def _seed_seen(storage, asin: str, hist: dict[int, float],
+               lowest=None, dropped_on_days_ago=None):
+    """Write a seen_books.json entry with price_history keyed by days-ago."""
+    entry = {
+        "title": "Test Book",
+        "author": "",
+        "url": "",
+        "first_seen": "2026-01-01T00:00:00+00:00",
+        "last_seen": "2026-01-01T00:00:00+00:00",
+        "lowest_price": lowest if lowest is not None else min(hist.values()),
+        "price_history": {_date(d): p for d, p in hist.items()},
+    }
+    if dropped_on_days_ago is not None:
+        entry["price_dropped_on"] = _date(dropped_on_days_ago) + "T00:00:00+00:00"
+    storage._write_seen({asin: entry})
+
+
+class TestPriceHistory:
+    def test_mark_seen_records_today(self, tmp_storage):
+        tmp_storage.mark_seen("B0X", "T", 1.99)
+        entry = tmp_storage._read_seen()["B0X"]
+        assert entry["price_history"] == {_date(0): 1.99}
+
+    def test_same_day_last_price_wins(self, tmp_storage):
+        tmp_storage.mark_seen("B0X", "T", 1.99)
+        tmp_storage.mark_seen("B0X", "T", 2.49)
+        hist = tmp_storage._read_seen()["B0X"]["price_history"]
+        assert hist == {_date(0): 2.49}          # one entry per day
+
+    def test_older_days_kept(self, tmp_storage):
+        _seed_seen(tmp_storage, "B0X", {1: 1.99, 2: 2.49})
+        tmp_storage.mark_seen("B0X", "T", 0.99)
+        hist = tmp_storage._read_seen()["B0X"]["price_history"]
+        assert hist[_date(1)] == 1.99
+        assert hist[_date(2)] == 2.49
+        assert hist[_date(0)] == 0.99
+
+    def test_legacy_entry_backfilled(self, tmp_storage):
+        # Old seen_books.json entries have no price_history → seeded on mark_seen
+        tmp_storage._write_seen({"B0X": {"title": "T", "lowest_price": 1.99}})
+        tmp_storage.mark_seen("B0X", "T", 2.49)
+        entry = tmp_storage._read_seen()["B0X"]
+        assert entry["price_history"] == {_date(0): 2.49}
+
+
+class TestBestPrice30d:
+    def test_worse_price_suppressed(self, tmp_storage):
+        _seed_seen(tmp_storage, "B0X", {3: 1.99})
+        assert tmp_storage.best_price_30d("B0X", 2.99) is False
+
+    def test_equal_price_allowed(self, tmp_storage):
+        _seed_seen(tmp_storage, "B0X", {3: 1.99})
+        assert tmp_storage.best_price_30d("B0X", 1.99) is True
+
+    def test_better_price_allowed(self, tmp_storage):
+        _seed_seen(tmp_storage, "B0X", {3: 1.99})
+        assert tmp_storage.best_price_30d("B0X", 0.99) is True
+
+    def test_unknown_asin_allowed(self, tmp_storage):
+        assert tmp_storage.best_price_30d("B0NEW", 2.99) is True
+
+    def test_no_history_allowed(self, tmp_storage):
+        tmp_storage._write_seen({"B0X": {"title": "T", "lowest_price": 1.99}})
+        assert tmp_storage.best_price_30d("B0X", 2.99) is True
+
+    def test_older_than_30d_ignored(self, tmp_storage):
+        # A 0.99 from 40 days ago is OUTSIDE the window — must not block 2.99
+        _seed_seen(tmp_storage, "B0X", {40: 0.99})
+        assert tmp_storage.best_price_30d("B0X", 2.99) is True
+        # ...but an in-window price still gates: 2.99 > 2.49 (5d ago) → blocked
+        _seed_seen(tmp_storage, "B0Y", {40: 0.99, 5: 2.49})
+        assert tmp_storage.best_price_30d("B0Y", 2.49) is True
+        assert tmp_storage.best_price_30d("B0Y", 2.99) is False
+
+    def test_legacy_lowest_within_30d(self, tmp_storage):
+        _seed_seen(tmp_storage, "B0X", {}, lowest=1.99, dropped_on_days_ago=5)
+        assert tmp_storage.best_price_30d("B0X", 2.99) is False
+
+
+class TestAntiStale:
+    def test_days_at_price_counts_within_window(self, tmp_storage):
+        hist = {i: 1.99 for i in range(20)}
+        hist.update({i: 2.99 for i in range(20, 30)})
+        _seed_seen(tmp_storage, "B0X", hist)
+        assert tmp_storage.days_at_price("B0X", 1.99) == 20
+
+    def test_days_at_price_ignores_outside_window(self, tmp_storage):
+        _seed_seen(tmp_storage, "B0X", {i: 1.99 for i in range(35, 45)})
+        assert tmp_storage.days_at_price("B0X", 1.99) == 0
+
+    def test_stale_after_14_days(self, tmp_storage):
+        _seed_seen(tmp_storage, "B0X", {i: 1.99 for i in range(15)})
+        assert tmp_storage.is_stale("B0X", 1.99) is True
+
+    def test_not_stale_under_14_days(self, tmp_storage):
+        _seed_seen(tmp_storage, "B0X", {i: 1.99 for i in range(10)})
+        assert tmp_storage.is_stale("B0X", 1.99) is False
+
+    def test_custom_max_days(self, tmp_storage):
+        _seed_seen(tmp_storage, "B0X", {i: 1.99 for i in range(12)})
+        assert tmp_storage.is_stale("B0X", 1.99, max_days=10) is True
+        assert tmp_storage.is_stale("B0X", 1.99, max_days=15) is False
+
+    def test_unknown_asin_not_stale(self, tmp_storage):
+        assert tmp_storage.is_stale("B0NEW", 1.99) is False
+
+    def test_should_report_combines_gates(self, tmp_storage):
+        # worse price → suppressed even though not stale
+        _seed_seen(tmp_storage, "B0X", {3: 1.99})
+        assert tmp_storage.should_report("B0X", 2.99) is False
+        # best price but parked there for 20 days → stale → suppressed
+        _seed_seen(tmp_storage, "B0Y", {i: 1.99 for i in range(20)})
+        assert tmp_storage.should_report("B0Y", 1.99) is False
+        # fresh + best price → reportable
+        _seed_seen(tmp_storage, "B0Z", {i: 1.99 for i in range(5)})
+        assert tmp_storage.should_report("B0Z", 1.99) is True
+
+
+# ─── Filters: BookBub limited-time gate (>=50% off) ────────────────
+
+class TestDiscountGate:
+    def test_50_percent_passes(self, bf):
+        assert bf.matches_discount(50) is True
+
+    def test_above_50_passes(self, bf):
+        assert bf.matches_discount(80) is True
+
+    def test_below_50_fails(self, bf):
+        assert bf.matches_discount(49) is False
+
+    def test_no_savings_fails(self, bf):
+        assert bf.matches_discount(None) is False
+
+    def test_apply_requires_discount(self, bf):
+        batch = [
+            nf_book(savings_pct=75),
+            nf_book(asin="B0T2", savings_pct=10),
+            nf_book(asin="B0T3", savings_pct=None),
+        ]
+        assert len(bf.apply(batch, require_discount=True)) == 1
+
+    def test_apply_default_keeps_missing_savings(self, bf):
+        # Pre-enrichment pass must not require the discount yet
+        assert len(bf.apply([nf_book()])) == 1

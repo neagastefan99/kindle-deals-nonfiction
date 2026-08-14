@@ -195,6 +195,17 @@ def main() -> None:
         if book_filter.is_tracked_author(author):
             book["tracked_author"] = True
 
+        # BookBub-inspired gates: never re-surface a book at a WORSE price
+        # than its best within the last 30 days, and drop books that have sat
+        # at this price for >14 days (permanent markdown, not a limited-time
+        # deal). Gated books are still recorded (history updates), just not
+        # reported as a deal.
+        if not storage.should_report(asin, price or 0.0):
+            storage.mark_seen(asin, title, price or 0.0, author, url)
+            suppressed_count += 1
+            print(f"  ⏸ GATED: {title} (${price})", file=sys.stderr)
+            continue
+
         report_books.append(book)
 
         if is_new:
@@ -232,6 +243,7 @@ def main() -> None:
         "filtered": len(filtered),
         "new": new_count,
         "price_drops": dropped_count,
+        "suppressed": suppressed_count,
         "reported": len(report_books),
     })
 

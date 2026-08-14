@@ -8,6 +8,7 @@ class BookFilter:
     def __init__(self, config: dict[str, Any]):
         fc = config.get("filters", {})
         self.max_price = fc.get("max_price", 4.99)
+        self.min_savings_pct = fc.get("min_savings_pct", 50)
         self.genres = [g.lower() for g in fc.get("genres", fc.get("topics", []))]
         self.tracked_authors = [a.lower() for a in fc.get("tracked_authors", [])]
         self.exclude_keywords = [k.lower() for k in fc.get("exclude_keywords", [])]
@@ -16,6 +17,11 @@ class BookFilter:
     def matches_price(self, price: float | None) -> bool:
         """Book must have a price and be under the cap."""
         return price is not None and price <= self.max_price
+
+    def matches_discount(self, savings_pct: float | None) -> bool:
+        """BookBub limited-time gate: only a REAL discount (>= min_savings_pct
+        off list price) counts as a deal — not just a price under the cap."""
+        return savings_pct is not None and savings_pct >= self.min_savings_pct
     
     def matches_genre(self, title: str, author: str = "", 
                       description: str = "", from_sff_page: bool = False) -> bool:
@@ -57,8 +63,14 @@ class BookFilter:
         """Always returns True — tracked authors get promoted, not exclusive."""
         return True
     
-    def apply(self, books: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Filter a list of books. Returns only matches."""
+    def apply(self, books: list[dict[str, Any]], require_discount: bool = False) -> list[dict[str, Any]]:
+        """Filter a list of books. Returns only matches.
+
+        `require_discount=True` enforces the BookBub limited-time gate
+        (savings_pct >= min_savings_pct). The pre-enrichment pass leaves it
+        off because deal pages don't carry savings yet; the post-enrichment
+        pass turns it on so only verified real discounts are surfaced.
+        """
         results = []
         for book in books:
             price = book.get("price")
@@ -67,6 +79,8 @@ class BookFilter:
             from_sff = book.get("from_sff_page", False)
             
             if not self.matches_price(price):
+                continue
+            if require_discount and not self.matches_discount(book.get("savings_pct")):
                 continue
             if not self.matches_genre(title, author, from_sff_page=from_sff):
                 continue

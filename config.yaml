@@ -7,6 +7,9 @@ sources:
     politics_bestsellers: /Best-Sellers-Kindle-Store-Politics-Social-Sciences/zgbs/digital-text/158519011
 filters:
   max_price: 4.99
+  # BookBub-style limited-time gate: only surface books at least this % off
+  # their list price (a real discount, not just a cheap price).
+  min_savings_pct: 50
   topics:
   - science
   - physics
