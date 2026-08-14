@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from filters import BookFilter
+from scraper import is_reportable
 from sources.lightpanda_fetcher import LightpandaFetcher
 
 
@@ -263,6 +264,111 @@ class TestStorageRefresh:
         st.mark_seen("B0X", "Book", 0.99)
         st.mark_seen("B0X", "Book", 4.99)
         assert st._read_seen()["B0X"]["lowest_price"] == 0.99
+
+
+# ─── Availability check (spike t_e934a2a3 §6b) ─────────────────────
+
+def _pp_soup(html):
+    from bs4 import BeautifulSoup
+    return BeautifulSoup(html, "lxml")
+
+
+def _nf_scraper():
+    from sources.amazon import AmazonDealsScraper
+    cfg = {
+        "sources": {"amazon": {
+            "base_url": "https://www.amazon.com",
+            "deals_x": "/x",
+        }},
+        "scraping": {"max_books_per_source": 50},
+    }
+    return AmazonDealsScraper(cfg)
+
+
+KINDLE_AVAILABLE = '''<div id="tmmSwatches"><div class="swatchElement selected" id="tmm-grid-swatch-KINDLE">
+<span class="slot-title">Kindle</span><span class="slot-price">$1.99</span>
+<span class="a-size-small a-color-secondary">Available instantly</span></div>
+<div class="swatchElement" id="tmm-grid-swatch-HARDCOVER">Hardcover $11.71</div></div>'''
+
+KINDLE_UNAVAILABLE = '''<div id="tmmSwatches"><div class="swatchElement" id="tmm-grid-swatch-KINDLE">
+<span>Kindle</span><span>$9.99</span>
+<span class="a-size-small a-color-secondary">Currently unavailable</span></div></div>'''
+
+KINDLE_UNAVAILABLE_PHRASE = '''<div id="formats"><div class="swatchElement" id="tmm-grid-swatch-KINDLE">
+Kindle $7.99 This title is not currently available for purchase</div></div>'''
+
+KINDLE_PREORDER = '''<div id="tmmSwatches"><div class="swatchElement" id="tmm-grid-swatch-KINDLE">
+Kindle $14.99 This title will be released on November 1, 2026</div></div>'''
+
+BUYBOX_AVAILABLE = '''<div id="buybox"><input id="one-click-button" type="submit" value="Buy now with 1-Click"/>
+<span id="checkoutButtonId-announce"> Buy now with 1-Click </span></div>'''
+
+BUYBOX_PREORDER = '''<div id="buybox"><input id="one-click-button" type="submit" value="Pre-order with 1-Click"/>
+<span>This title will be released on January 5, 2027</span></div>'''
+
+NO_KINDLE_ROW = '''<div id="tmmSwatches"><div class="swatchElement" id="tmm-grid-swatch-AUDIO_DOWNLOAD">
+Audiobook $0.00</div><div class="swatchElement" id="tmm-grid-swatch-PAPERBACK">Paperback $8.94</div></div>'''
+
+
+class TestAvailability:
+    def test_kindle_row_available(self):
+        info = _nf_scraper().parse_product_page(_pp_soup(KINDLE_AVAILABLE))
+        assert info.get("available") is True
+        assert info.get("preorder", False) is False
+
+    def test_kindle_row_currently_unavailable(self):
+        info = _nf_scraper().parse_product_page(_pp_soup(KINDLE_UNAVAILABLE))
+        assert info.get("available") is False
+
+    def test_kindle_row_unavailable_phrase(self):
+        info = _nf_scraper().parse_product_page(_pp_soup(KINDLE_UNAVAILABLE_PHRASE))
+        assert info.get("available") is False
+
+    def test_preorder_release_date(self):
+        info = _nf_scraper().parse_product_page(_pp_soup(KINDLE_PREORDER))
+        assert info.get("preorder") is True
+        assert info.get("available") is False
+
+    def test_buybox_fallback_available(self):
+        info = _nf_scraper().parse_product_page(_pp_soup(BUYBOX_AVAILABLE))
+        assert info.get("available") is True
+
+    def test_buybox_preorder(self):
+        info = _nf_scraper().parse_product_page(_pp_soup(BUYBOX_PREORDER))
+        assert info.get("preorder") is True
+        assert info.get("available") is False
+
+    def test_no_kindle_row_unknown(self):
+        # No Kindle row / no buybox signal → availability not asserted (kept)
+        info = _nf_scraper().parse_product_page(_pp_soup(NO_KINDLE_ROW))
+        assert "available" not in info
+        assert info.get("preorder", False) is False
+
+    def test_none_soup(self):
+        assert _nf_scraper().parse_product_page(None) == {}
+
+
+class TestReportable:
+    """scraper.is_reportable — the availability gate applied after enrichment."""
+
+    def test_available_kept(self):
+        assert is_reportable({"available": True}) is True
+
+    def test_unavailable_dropped(self):
+        assert is_reportable({"available": False}) is False
+
+    def test_preorder_dropped(self):
+        assert is_reportable({"preorder": True}) is False
+
+    def test_preorder_also_unavailable_dropped(self):
+        assert is_reportable({"available": False, "preorder": True}) is False
+
+    def test_unknown_kept(self):
+        # No availability signal (e.g. fetch failed) → keep, no regression
+        assert is_reportable({}) is True
+
+    def test_available_none_kept(self):
+        assert is_reportable({"available": None}) is True
 
 
 # ─── Lightpanda 503 rate-limit retry (regression: t_db840b83) ────────

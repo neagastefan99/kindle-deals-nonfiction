@@ -106,6 +106,77 @@ class AmazonDealsScraper:
 
     # ─── HTML DOM parsing ──────────────────────────────────────────
 
+    @staticmethod
+    def _kindle_swatch_text(container) -> str | None:
+        """Text of the KINDLE row inside a #tmmSwatches / div#formats container.
+
+        Amazon renders each format as a `.swatchElement` row; the Kindle one
+        has id `tmm-grid-swatch-KINDLE`. Fall back to scanning rows by text,
+        then to slicing the container text at the next known format token.
+        """
+        if container is None:
+            return None
+        kindle = container.select_one('#tmm-grid-swatch-KINDLE')
+        if kindle:
+            return AmazonDealsScraper._clean_text(kindle.get_text(" ", strip=True))
+        for row in container.select('.swatchElement'):
+            text = AmazonDealsScraper._clean_text(row.get_text(" ", strip=True))
+            if re.search(r'\bKindle\b', text, re.IGNORECASE):
+                return text
+        full = AmazonDealsScraper._clean_text(container.get_text(" ", strip=True))
+        m = re.search(
+            r'Kindle\b(.{0,200}?)(?=\s+(?:Audiobook|Audible|Hardcover|Paperback|'
+            r'Mass Market|Audio CD|Board Book|MP3 CD|Library Binding|Other)\b)',
+            full, re.IGNORECASE)
+        if m:
+            return f"Kindle {m.group(1)}".strip()
+        return None
+
+    @staticmethod
+    def _detect_availability(soup) -> dict[str, Any]:
+        """Availability of the KINDLE edition from a product page (spike §5/6b).
+
+        Returns {"available": bool | None, "preorder": bool} where
+        available=None means no positive signal was found (caller decides;
+        the scraper treats unknown as keep). Signals, scoped to the Kindle row:
+          'Available instantly'            → available
+          'Currently unavailable'          → unavailable
+          'not currently available for purchase' → unavailable
+          'will be released on' / 'Pre-order'    → preorder (not buyable now)
+        Fallback when no swatch block exists: 'Buy now with 1-Click' in
+        #buybox → available (plus the same unavailable/preorder phrases).
+        """
+        out: dict[str, Any] = {"available": None, "preorder": False}
+
+        container = soup.select_one('#tmmSwatches') or soup.select_one('div#formats')
+        kindle_text = AmazonDealsScraper._kindle_swatch_text(container)
+
+        if kindle_text:
+            low = kindle_text.lower()
+            if "available instantly" in low:
+                out["available"] = True
+            elif ("currently unavailable" in low
+                  or "not currently available for purchase" in low):
+                out["available"] = False
+            elif "pre-order" in low or "will be released on" in low:
+                out["preorder"] = True
+                out["available"] = False
+            # No status token on the Kindle row → unknown (keep)
+            return out
+
+        buybox = soup.select_one('#buybox')
+        if buybox is not None:
+            low = AmazonDealsScraper._clean_text(
+                buybox.get_text(" ", strip=True)).lower()
+            if "buy now with 1-click" in low:
+                out["available"] = True
+            elif "pre-order" in low or "this title will be released on" in low:
+                out["preorder"] = True
+                out["available"] = False
+            elif "currently unavailable" in low:
+                out["available"] = False
+        return out
+
     def parse_deals_page(self, soup) -> list[dict[str, Any]]:
         """Parse a deal listing page soup into book dicts."""
         if not soup:
@@ -271,6 +342,13 @@ class AmazonDealsScraper:
         cover = self.extract_cover_url(soup)
         if cover:
             info["cover_url"] = cover
+
+        # Availability of the KINDLE edition (spike t_e934a2a3 §5/6b)
+        avail = self._detect_availability(soup)
+        if avail["available"] is not None:
+            info["available"] = avail["available"]
+        if avail["preorder"]:
+            info["preorder"] = True
 
         return info
 
