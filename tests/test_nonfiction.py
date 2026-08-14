@@ -740,6 +740,30 @@ class TestListPriceBasis:
         assert AmazonDealsScraper._clean_price("") is None
 
 
+# ─── Formatter: limited-time marker (spike t_e934a2a3 §6f) ─────────
+
+class TestLimitedTimeMarker:
+    def test_marker_present_at_50_percent(self):
+        from formatter import format_report
+        r = format_report([nf_book(list_price=9.99, savings_pct=50)], 1, 0)
+        assert "limited time" in r
+
+    def test_marker_present_above_50(self):
+        from formatter import format_report
+        r = format_report([nf_book(list_price=9.99, savings_pct=80)], 1, 0)
+        assert "limited time" in r
+
+    def test_marker_absent_below_50(self):
+        from formatter import format_report
+        r = format_report([nf_book(list_price=9.99, savings_pct=30)], 1, 0)
+        assert "limited time" not in r
+
+    def test_marker_absent_without_savings(self):
+        from formatter import format_report
+        r = format_report([nf_book(list_price=9.99, savings_pct=None)], 1, 0)
+        assert "limited time" not in r
+
+
 # ─── Storage: BookBub price gates (best-price 30d, anti-stale 14d) ──
 
 from datetime import datetime, timedelta, timezone  # noqa: E402

@@ -128,9 +128,12 @@ def main() -> None:
     print("💰 Fetching accurate product-page prices (batch)...", file=sys.stderr)
     product_urls = [b["url"] for b in filtered if b.get("url")]
     soups = scraper.prefetch(product_urls)
+    enriched = []
     for book in filtered:
         soup = soups.get(book.get("url", ""))
         if not soup:
+            # (e) failed enrichment → DROP (never keep the stale deal-feed price)
+            print(f"  🚫 DROP (no product page): {book['title'][:50]}", file=sys.stderr)
             continue
         info = scraper.parse_product_page(soup)
         if info.get("is_ebook") is False:
@@ -138,14 +141,14 @@ def main() -> None:
             # (print/audiobook-only listing) — drop, don't report its price.
             book["is_ebook"] = False
             continue
-        if info.get("price"):
-            old = book.get("price")
-            book["price"] = info["price"]
-            if old != info["price"]:
-                print(f"  💵 {book['title'][:50]}... ${old} → ${info['price']}", file=sys.stderr)
+        if not info.get("price"):
+            # (e) ambiguous enrichment: no confirmed live price → DROP
+            print(f"  🚫 DROP (no live price): {book['title'][:50]}", file=sys.stderr)
+            continue
+        book["price"] = info["price"]
         if info.get("list_price"):
             book["list_price"] = info["list_price"]
-        if info.get("savings_pct"):
+        if info.get("savings_pct") is not None:
             book["savings_pct"] = info["savings_pct"]
         if info.get("cover_url"):
             book["cover_url"] = info["cover_url"]
@@ -153,6 +156,13 @@ def main() -> None:
             book["available"] = info["available"]
         if info.get("preorder"):
             book["preorder"] = True
+        enriched.append(book)
+
+    filtered = enriched
+    dropped_enrich = len(product_urls) - len(filtered)
+    if dropped_enrich:
+        print(f"  🚫 Enrichment dropped {dropped_enrich} book(s) "
+              f"(no page / no live price / non-Kindle)", file=sys.stderr)
 
     # --- Edition guard (§6c): drop non-Kindle-ebook ASINs ---
     guard_before = len(filtered)

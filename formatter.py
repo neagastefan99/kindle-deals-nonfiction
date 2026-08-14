@@ -31,6 +31,10 @@ def _format_book_entry(book: dict[str, Any]) -> str:
         details += f" ~~${list_price:.2f}~~"
     elif savings_pct:
         details += f" \\({savings_pct}% off\\)"
+    # BookBub-style "limited time" flag (§6f): a real markdown (>=50% off the
+    # ebook list price), not an everyday low price.
+    if savings_pct is not None and savings_pct >= 50:
+        details += " ⏳ limited time"
     if url:
         details += f"  🔗 [Link]({url})"
     lines.append(details)
