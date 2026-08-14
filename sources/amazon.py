@@ -70,9 +70,21 @@ class AmazonDealsScraper:
 
     @staticmethod
     def _clean_price(raw: str) -> float | None:
-        cleaned = re.sub(r"[^\d.]", "", raw)
+        """Extract the FIRST numeric token from raw price text.
+
+        Old behavior stripped all non-digits then float()'d the whole string,
+        which chokes on Amazon's duplicated price spans ("$12.99 $12.99" →
+        "12.9912.99" → None) and silently mangles list prices. Taking the first
+        numeric token handles duplication and Lightpanda's spaced "1 . 99" form.
+        """
+        if not raw:
+            return None
+        compact = re.sub(r"\s+", "", str(raw))
+        m = re.search(r"\d+(?:\.\d+)?", compact)
+        if not m:
+            return None
         try:
-            return round(float(cleaned), 2)
+            return round(float(m.group(0)), 2)
         except ValueError:
             return None
 
@@ -130,6 +142,131 @@ class AmazonDealsScraper:
             full, re.IGNORECASE)
         if m:
             return f"Kindle {m.group(1)}".strip()
+        return None
+
+    @staticmethod
+    def _kindle_row_element(container):
+        """The KINDLE row element inside a #tmmSwatches / div#formats block.
+
+        Amazon renders each format as a row; the Kindle one has id
+        `tmm-grid-swatch-KINDLE` (legacy `<li>`, modern `.swatchElement`,
+        or the `.a-button-inner` of the swatch grid). Falls back to scanning
+        rows by text.
+        """
+        if container is None:
+            return None
+        kindle = container.select_one('#tmm-grid-swatch-KINDLE')
+        if kindle:
+            return kindle
+        for row in container.select('.swatchElement, .a-button-inner, li'):
+            text = AmazonDealsScraper._clean_text(row.get_text(" ", strip=True))
+            if re.search(r'\bKindle\b', text, re.IGNORECASE):
+                return row
+        return None
+
+    @staticmethod
+    def _kindle_row_prices(container) -> tuple[float | None, float | None]:
+        """(deal, list) price pair from the KINDLE row of #tmmSwatches.
+
+        Returns the EBOOK edition's OWN prices (spike t_e934a2a3 §5/6a):
+          - list: the struck-through price element inside the Kindle row
+            (`.a-text-price` / `[data-a-strike]`) — the ebook's own list
+            price when Amazon renders it beside the deal;
+          - deal: the row's current price — `.ebook-price-value` / its
+            aria-label, else the first `$X.XX` token NOT inside the struck
+            element; on membership rows ("Kindle $0.00 or $1.99 to buy")
+            the "to buy" price wins.
+        When the page exposes no struck-through list (e.g. the live
+        B0B2P2N58X row is just "Kindle $1.99 Available instantly"), list
+        stays None and the caller falls back to apex-basisprice-value (the
+        print list, imperfect but the only remaining source).
+        Returns (None, None) when the row or its price is absent (e.g.
+        Lightpanda leaves #tmmSwatches empty) so apex becomes the fallback.
+        """
+        if container is None:
+            return None, None
+        kindle_row = AmazonDealsScraper._kindle_row_element(container)
+        if kindle_row is None:
+            return None, None
+
+        # List price: the struck-through element, wherever it sits in the row.
+        list_price = None
+        struck = None
+        for sel in ('.a-text-price', '[data-a-strike="true"]'):
+            el = kindle_row.select_one(sel)
+            if el:
+                p = AmazonDealsScraper._clean_price(el.get_text(" ", strip=True))
+                if p:
+                    list_price = p
+                    struck = el
+                break
+
+        # Deal price: the "to buy" price wins on membership rows
+        # ("Kindle $0.00 or $1.99 to buy" — the aria-label shows $0.00).
+        # Then the dedicated price element (`.ebook-price-value`), else the
+        # first `$X.XX` token NOT inside the struck element.
+        deal = None
+        text = AmazonDealsScraper._clean_text(kindle_row.get_text(" ", strip=True))
+        m = re.search(r'\bor\s+\$\s?(\d+(?:\.\d+)?)\s+to\s+buy',
+                      text, re.IGNORECASE)
+        if m:
+            deal = AmazonDealsScraper._clean_price(m.group(1))
+        if deal is None:
+            price_el = (kindle_row.select_one('.ebook-price-value')
+                        or kindle_row.select_one('span[aria-label*="$"]'))
+            if price_el is not None:
+                deal = AmazonDealsScraper._clean_price(
+                    price_el.get('aria-label') or price_el.get_text(" ", strip=True))
+        if deal is None:
+            # First token NOT inside the struck element — the struck text
+            # (list price) may precede the deal token in the DOM.
+            if struck is not None:
+                struck_text = AmazonDealsScraper._clean_text(
+                    struck.get_text(" ", strip=True))
+                text = text.replace(struck_text, "")
+            tokens = re.findall(r'\$\s?(\d+(?:\.\d+)?)', text)
+            if tokens:
+                deal = AmazonDealsScraper._clean_price(tokens[0])
+
+        # Some layouts render the list as a second, higher token with no
+        # strike markup ("Kindle $1.99 $9.99") — keep that as a fallback.
+        if list_price is None and deal is not None:
+            text = AmazonDealsScraper._clean_text(kindle_row.get_text(" ", strip=True))
+            tokens = re.findall(r'\$\s?(\d+(?:\.\d+)?)', text)
+            if len(tokens) >= 2:
+                second = AmazonDealsScraper._clean_price(tokens[1])
+                if second is not None and second > deal:
+                    list_price = second
+
+        return deal, list_price
+
+    @staticmethod
+    def _kindle_price_basis(soup) -> float | None:
+        """Ebook list price from a \"Kindle Price\" basis element (spike §6a).
+
+        Classic buybox layouts render `Kindle Price: $1.99 / List Price:
+        $9.99` in a `.kindle-price` / `[class*=\"kindle-price\"]` block. The
+        \"List Price\" token there is the EBOOK's own list price — unlike
+        `apex-basisprice-value`, which is the PRINT list. Returns None when
+        only the print basis is present.
+        """
+        if soup is None:
+            return None
+        for sel in (
+            '#kindle-price-basis', '.kindle-price', '.ebooks-price-basis',
+            '[class*="kindle-price"]', '[class*="ebooks-price"]',
+        ):
+            for el in soup.select(sel):
+                text = AmazonDealsScraper._clean_text(el.get_text(" ", strip=True))
+                if 'print list price' in text.lower():
+                    continue
+                m = re.search(
+                    r'list\s*price[^$]*?\$\s?(\d+(?:\.\d+)?)',
+                    text, re.IGNORECASE | re.DOTALL)
+                if m:
+                    p = AmazonDealsScraper._clean_price(m.group(1))
+                    if p:
+                        return p
         return None
 
     @staticmethod
@@ -333,25 +470,45 @@ class AmazonDealsScraper:
         elif swatch_box is not None:
             info["is_ebook"] = False
 
-        # Apex price-to-pay: text like "$ 1 . 99" (Lightpanda leaves .a-offscreen empty)
-        apex = soup.select_one('.apex-pricetopay-value')
-        if apex:
-            price = self._clean_price(apex.get_text(" ", strip=True))
-            if price:
-                info["price"] = price
+        # KINDLE row price — the EBOOK edition's own deal price (spike
+        # t_e934a2a3 §5/6a). The apex block's basis price is the PRINT list
+        # price ("Print List Price: $12.99" on B0B2P2N58X), which inflates
+        # savings %. The Kindle row in #tmmSwatches / div#formats carries the
+        # ebook's own price; prefer it and keep apex as fallback (Lightpanda
+        # may leave #tmmSwatches empty).
+        kindle_deal, kindle_list = self._kindle_row_prices(swatch_box)
+        if kindle_deal is not None:
+            info["price"] = kindle_deal
+        if kindle_list is not None:
+            info["list_price"] = kindle_list
 
-        # List price (basis)
-        basis = soup.select_one('.apex-basisprice-value')
-        if basis:
-            list_price = self._clean_price(basis.get_text(" ", strip=True))
-            if list_price:
-                info["list_price"] = list_price
+        # Apex price-to-pay fallback: text like "$ 1 . 99" (Lightpanda leaves
+        # .a-offscreen empty, skill documents .apex-pricetopay-value).
+        if "price" not in info:
+            apex = soup.select_one('.apex-pricetopay-value')
+            if apex:
+                price = self._clean_price(apex.get_text(" ", strip=True))
+                if price:
+                    info["price"] = price
 
-        savings_el = soup.select_one('.apex-savings-percentage')
-        if savings_el:
-            pct = re.search(r'(\d+)%', savings_el.get_text())
-            if pct:
-                info["savings_pct"] = int(pct.group(1))
+        # List price fallback: a "Kindle Price" basis element, then the
+        # apex-basisprice-value (the PRINT list — imperfect, but the only
+        # remaining source when no Kindle-specific list is exposed).
+        if "list_price" not in info:
+            basis_price = self._kindle_price_basis(soup)
+            if basis_price is None:
+                basis = soup.select_one('.apex-basisprice-value')
+                if basis:
+                    basis_price = self._clean_price(basis.get_text(" ", strip=True))
+            if basis_price:
+                info["list_price"] = basis_price
+
+        # Savings (spike §6a): recompute from price/list_price ourselves.
+        # apex-savings-percentage references the PRINT list price and is
+        # therefore not trustworthy — never read it.
+        price = info.get("price")
+        if price and info.get("list_price") and info["list_price"] > price:
+            info["savings_pct"] = round((1 - price / info["list_price"]) * 100)
 
         cover = self.extract_cover_url(soup)
         if cover:

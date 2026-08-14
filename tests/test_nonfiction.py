@@ -584,6 +584,162 @@ class TestEditionGuard:
         assert info.get("is_ebook") is True
 
 
+# ─── List price / savings basis: Kindle ebook list, not print (t_88d6c2d9) ─
+
+class TestListPriceBasis:
+    """parse_product_page must read the EBOOK list price from the Kindle row
+    (#tmmSwatches / div#formats), not the print list price from
+    apex-basisprice-value, and recompute savings from price/list_price.
+    apex-savings-percentage (references the print list) is never trusted.
+    """
+
+    def _scraper(self):
+        from sources.amazon import AmazonDealsScraper
+        cfg = {"sources": {"amazon": {
+            "base_url": "https://www.amazon.com",
+            "deals_today": "/x",
+        }}, "scraping": {"max_books_per_source": 50}}
+        return AmazonDealsScraper(cfg)
+
+    def _info(self, body: str) -> dict:
+        from bs4 import BeautifulSoup
+        return self._scraper().parse_product_page(
+            BeautifulSoup(f"<html><body>{body}</body></html>", "lxml"))
+
+    def test_kindle_row_struck_list_price_preferred_over_print(self):
+        # Kindle row carries the ebook list price as a struck-through element;
+        # apex-basisprice-value holds the PRINT list price (higher). The parser
+        # must pick the KINDLE list, not the print basis.
+        body = (
+            '<div id="tmmSwatches">'
+            '<div class="swatchElement" id="tmm-grid-swatch-KINDLE">'
+            '<span class="a-button-text">Kindle '
+            '<span class="a-price a-text-price" data-a-strike="true"><span class="a-offscreen">$9.99</span>$9.99</span> '
+            '$1.99 Available instantly</span>'
+            '</div></div>'
+            '<span class="apex-pricetopay-value">$ 1 . 99</span>'
+            '<span class="apex-basisprice-value">$12.99 $12.99</span>'
+            '<span class="apex-savings-percentage">-85%</span>'
+        )
+        info = self._info(body)
+        assert info["price"] == 1.99
+        assert info["list_price"] == 9.99          # ebook list, NOT 12.99
+        assert info["savings_pct"] == 80           # recomputed, NOT 85
+        assert info["available"] is True
+
+    def test_kindle_price_basis_element_preferred(self):
+        # A "Kindle Price" basis element labelled "List Price" (not "Print
+        # List Price") supplies the ebook list price.
+        body = (
+            '<div id="tmmSwatches">'
+            '<div class="swatchElement" id="tmm-grid-swatch-KINDLE">'
+            '<span class="a-button-text">Kindle $1.99 Available instantly</span>'
+            '</div></div>'
+            '<span class="apex-pricetopay-value">$ 1 . 99</span>'
+            '<span class="apex-basisprice-value">$12.99 $12.99</span>'
+            '<span class="kindle-price">Kindle Price: $1.99 '
+            '<span class="a-color-secondary">List Price:</span> '
+            '<span class="a-text-price">$9.99</span></span>'
+        )
+        info = self._info(body)
+        assert info["price"] == 1.99
+        assert info["list_price"] == 9.99
+        assert info["savings_pct"] == 80
+
+    def test_print_list_fallback_when_no_kindle_list(self):
+        # No Kindle-specific list on the page → fall back to apex basis.
+        body = (
+            '<div id="tmmSwatches">'
+            '<div class="swatchElement" id="tmm-grid-swatch-KINDLE">'
+            '<span class="a-button-text">Kindle $1.99 Available instantly</span>'
+            '</div></div>'
+            '<span class="apex-pricetopay-value">$ 1 . 99</span>'
+            '<span class="apex-basisprice-value">$12.99 $12.99</span>'
+        )
+        info = self._info(body)
+        assert info["price"] == 1.99
+        assert info["list_price"] == 12.99         # fallback
+        assert info["savings_pct"] == 85           # round((1-1.99/12.99)*100)
+
+    def test_apex_savings_percentage_ignored(self):
+        # apex-savings-percentage (85%, vs PRINT list) must be ignored even
+        # when present; savings is recomputed from the ebook list price.
+        body = (
+            '<div id="tmmSwatches">'
+            '<div class="swatchElement" id="tmm-grid-swatch-KINDLE">'
+            '<span class="a-button-text">Kindle '
+            '<span class="a-text-price" data-a-strike="true">$9.99</span> '
+            '$1.99 Available instantly</span>'
+            '</div></div>'
+            '<span class="apex-pricetopay-value">$ 1 . 99</span>'
+            '<span class="apex-basisprice-value">$12.99 $12.99</span>'
+            '<span class="apex-savings-percentage">-85%</span>'
+        )
+        info = self._info(body)
+        assert info["savings_pct"] == 80
+
+    def test_live_dom_shape_ebook_price_value(self):
+        # Real B0B2P2N58X DOM (verified 2026-08-14): the Kindle row uses
+        # `.ebook-price-value` + aria-label for the deal and slot-extraMessage
+        # for availability. The ebook list price lives in a struck
+        # `.a-text-price` INSIDE the row — the parser must prefer it over the
+        # print apex basis even though apex appears later in the DOM.
+        body = (
+            '<div id="tmmSwatches">'
+            '<div class="swatchElement" id="tmm-grid-swatch-KINDLE">'
+            '<span class="slot-title">Kindle</span>'
+            '<span class="slot-price">'
+            '<span aria-label="$1.99" class="a-color-price ebook-price-value">$1.99</span>'
+            '<span class="a-text-price" data-a-strike="true">$9.99</span>'
+            '</span>'
+            '<span class="slot-extraMessage"><span class="kindleExtraMessage">'
+            '<span aria-label="Available instantly">Available instantly</span>'
+            '</span></span>'
+            '</div>'
+            '<div class="swatchElement" id="tmm-grid-swatch-AUDIO_DOWNLOAD">Audiobook $0.00</div>'
+            '<div class="swatchElement" id="tmm-grid-swatch-HARDCOVER">Hardcover $11.71</div>'
+            '<div class="swatchElement" id="tmm-grid-swatch-PAPERBACK">Paperback $8.94</div>'
+            '</div>'
+            '<span class="apex-pricetopay-value">$ 1 . 99</span>'
+            '<span class="apex-basisprice-value">$12.99 $12.99</span>'
+            '<span class="apex-savings-percentage">-85%</span>'
+        )
+        info = self._info(body)
+        assert info["price"] == 1.99
+        assert info["list_price"] == 9.99          # ebook list, NOT 12.99
+        assert info["savings_pct"] == 80           # 80%, NOT 85%
+        assert info.get("available") is True
+        assert info.get("is_ebook") is True
+
+    def test_membership_row_or_price_to_buy(self):
+        # 'Kindle $0.00 or $1.99 to buy' — the "to buy" price is the deal;
+        # the $0.00 membership token must not be reported as the price.
+        body = (
+            '<div id="tmmSwatches">'
+            '<div class="swatchElement" id="tmm-grid-swatch-KINDLE">'
+            '<span class="slot-title">Kindle</span>'
+            '<span class="slot-price">'
+            '<span aria-label="$0.00" class="a-color-price ebook-price-value">$0.00</span>'
+            '</span>'
+            '<span class="slot-extraMessage"><span class="kindleExtraMessage">'
+            '<span>or $1.99 to buy</span>'
+            '</span></span>'
+            '</div></div>'
+            '<span class="apex-pricetopay-value">$ 1 . 99</span>'
+        )
+        info = self._info(body)
+        assert info["price"] == 1.99               # "to buy" price wins
+        assert "list_price" not in info            # no list exposed → unset
+
+    def test_clean_price_first_numeric_token(self):
+        # "$12.99 $12.99" (hidden+visible spans) must not become "12.9912.99"
+        from sources.amazon import AmazonDealsScraper
+        assert AmazonDealsScraper._clean_price("$12.99 $12.99") == 12.99
+        assert AmazonDealsScraper._clean_price("$ 1 . 99") == 1.99
+        assert AmazonDealsScraper._clean_price("$0.00") == 0.0
+        assert AmazonDealsScraper._clean_price("") is None
+
+
 # ─── Storage: BookBub price gates (best-price 30d, anti-stale 14d) ──
 
 from datetime import datetime, timedelta, timezone  # noqa: E402
