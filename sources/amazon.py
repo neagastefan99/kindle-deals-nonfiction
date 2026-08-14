@@ -460,14 +460,17 @@ class AmazonDealsScraper:
         # to the KINDLE ebook edition. #tmmSwatches lists every format (Kindle /
         # Audiobook / Hardcover / Paperback) with its own price; a Kindle-ebook
         # listing always has a Kindle row WITH a price. If the swatch block
-        # exists but the only prices come from print/audio rows (no Kindle row,
-        # or a Kindle row without a price), this ASIN is NOT the Kindle ebook
-        # edition → mark non-ebook so scraper.py drops it.
+        # exists and shows format rows but the only prices come from print/audio
+        # rows (no Kindle row, or a Kindle row without a price), this ASIN is
+        # NOT the Kindle ebook edition → mark non-ebook so scraper.py drops it.
+        # An EMPTY swatch container (Lightpanda renders the block but leaves it
+        # blank) carries no format evidence → UNKNOWN (is_ebook unset, keep).
         swatch_box = soup.select_one('#tmmSwatches') or soup.select_one('div#formats')
         kindle_text = self._kindle_swatch_text(swatch_box)
         if kindle_text and re.search(r'\$\s?\d+(?:\.\d+)?', kindle_text):
             info["is_ebook"] = True
-        elif swatch_box is not None:
+        elif swatch_box is not None and len(
+                self._clean_text(swatch_box.get_text(" ", strip=True))) > 0:
             info["is_ebook"] = False
 
         # KINDLE row price — the EBOOK edition's own deal price (spike

@@ -469,6 +469,45 @@ class TestLightpanda503Retry:
         assert state["n"] == 1          # no pointless retry
         assert out[url] is not None
 
+    def test_captcha_page_is_retried_and_falls_back(self, tmp_path, monkeypatch):
+        """Amazon anti-bot interstitial (validateCaptcha / 'Click the button
+        below to continue shopping') must be treated as an error page so the
+        retry loop runs and the curl_cffi fallback gets a chance — otherwise
+        the 3KB captcha is cached as a valid page and every book dies at
+        enrichment with no price."""
+        url = "https://www.amazon.com/dp/B0TEST00001"
+        captcha = (
+            "<html><body><div class='a-box'>"
+            "<h4>Click the button below to continue shopping</h4>"
+            "<form action='/errors_page/validateCaptcha' method='get'>"
+            "<input name='amzn' type='hidden' value='abc'/>"
+            "<button type='submit'>Continue shopping</button>"
+            "</form></div></body></html>"
+        )
+        state = _fake_subprocess_run(monkeypatch, [
+            _lp_result(url, 200, captcha),
+            _lp_result(url, 200, "<html><div data-asin='B0TEST00001'>book</div></html>"),
+        ])
+        f = _lp_fetcher(tmp_path)
+        out = f.fetch_all([url])
+        assert state["n"] == 2          # captcha triggers exactly one retry
+        assert out[url] is not None     # second fetch succeeded
+
+    def test_captcha_exhaustion_returns_none(self, tmp_path, monkeypatch):
+        """All attempts served captcha → None + failure recorded, so
+        FallbackFetcher will retry the URL with curl_cffi."""
+        url = "https://www.amazon.com/dp/B0TEST00001"
+        captcha = ("<html><body><h4>Click the button below to continue "
+                   "shopping</h4></body></html>")
+        state = _fake_subprocess_run(monkeypatch, [
+            _lp_result(url, 200, captcha),
+        ])
+        f = _lp_fetcher(tmp_path)
+        out = f.fetch_all([url])
+        assert state["n"] == 3          # all retries exhausted
+        assert out[url] is None
+        assert f.last_failures[url] == "HTTP 200"
+
     def test_fallback_only_after_exhaustion(self, config, capsys):
         from sources.fallback_fetcher import FallbackFetcher
         from bs4 import BeautifulSoup
@@ -572,6 +611,20 @@ class TestEditionGuard:
     def test_no_swatch_block_is_unknown(self):
         # No #tmmSwatches/#formats → cannot verify → is_ebook unset → keep
         info = self._info('<div class="a-section"><span class="apex-pricetopay-value">$ 1 . 99</span></div>')
+        assert "is_ebook" not in info
+
+    def test_empty_swatch_block_is_unknown(self):
+        """Lightpanda renders #tmmSwatches but leaves it EMPTY (no format
+        rows). An empty container carries no format evidence → is_ebook
+        unset → keep. Regression: previously ANY present swatch block
+        without a priced Kindle row set is_ebook=False, dropping every
+        book on Lightpanda-rendered pages."""
+        info = self._info('<div id="tmmSwatches"></div>')
+        assert "is_ebook" not in info
+
+    def test_whitespace_swatch_block_is_unknown(self):
+        # Same as empty, but with whitespace-only content
+        info = self._info('<div id="tmmSwatches">\n  \n</div>')
         assert "is_ebook" not in info
 
     def test_old_layout_li_rows_with_tmm_ebooks(self):

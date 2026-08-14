@@ -49,6 +49,13 @@ ERROR_PAGE_PATTERNS = [
     re.compile(r"try again later", re.IGNORECASE),
     re.compile(r"rate limit", re.IGNORECASE),
     re.compile(r"access denied", re.IGNORECASE),
+    # Amazon anti-bot interstitial: "Click the button below to continue
+    # shopping" with a /errors_page/validateCaptcha form. Lightpanda can be
+    # served this for product pages while deal pages succeed; without these
+    # signatures the captcha page is cached as a VALID fetch, the curl_cffi
+    # fallback never runs, and every book dies at enrichment with no price.
+    re.compile(r"validateCaptcha", re.IGNORECASE),
+    re.compile(r"click the button below to continue shopping", re.IGNORECASE),
 ]
 _ERROR_PAGE_MAX_BYTES = 60_000
 
