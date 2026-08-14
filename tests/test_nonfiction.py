@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from filters import BookFilter
+from sources.lightpanda_fetcher import LightpandaFetcher
 
 
 @pytest.fixture
@@ -262,3 +263,127 @@ class TestStorageRefresh:
         st.mark_seen("B0X", "Book", 0.99)
         st.mark_seen("B0X", "Book", 4.99)
         assert st._read_seen()["B0X"]["lowest_price"] == 0.99
+
+
+# ─── Lightpanda 503 rate-limit retry (regression: t_db840b83) ────────
+
+def _fake_subprocess_run(monkeypatch, responses):
+    """Patch subprocess.run with a fake returning responses in order (last repeats)."""
+    import subprocess as _sp
+    state = {"n": 0}
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=300):
+        i = min(state["n"], len(responses) - 1)
+        state["n"] += 1
+        return _sp.CompletedProcess([], 0, stdout=responses[i], stderr="")
+
+    monkeypatch.setattr("sources.lightpanda_fetcher.subprocess.run", fake_run)
+    return state
+
+
+def _lp_result(url, status, content):
+    return json.dumps({"results": [{"url": url, "http_status": status, "content": content}]})
+
+
+def _lp_fetcher(tmp_path):
+    cfg = {"scraping": {
+        "lightpanda_cookies": str(tmp_path / "cookies.json"),
+        "lightpanda_retries": 3,
+        "lightpanda_retry_backoff": [0, 0],
+    }}
+    return LightpandaFetcher(cfg)
+
+
+class _FakeFetcher:
+    """Minimal primary/fallback stand-in with fetch_all + last_failures."""
+
+    def __init__(self, results, failures=None):
+        self._results = results
+        self.last_failures = failures or {}
+        self.calls = 0
+
+    def fetch_all(self, urls):
+        self.calls += 1
+        return dict(self._results)
+
+
+class TestLightpanda503Retry:
+    """Regression: Amazon 503 rate-limit must retry with backoff, and the
+    FallbackFetcher must only fall back after retries are exhausted."""
+
+    def test_503_then_200_retries_and_succeeds(self, tmp_path, monkeypatch):
+        url = "https://www.amazon.com/dp/B0TEST00001"
+        state = _fake_subprocess_run(monkeypatch, [
+            _lp_result(url, 503, "<html><body>Sorry! Something went wrong.</body></html>"),
+            _lp_result(url, 200, "<html><div data-asin='B0TEST00001'>book</div></html>"),
+        ])
+        f = _lp_fetcher(tmp_path)
+        out = f.fetch_all([url])
+        assert state["n"] == 2          # exactly one retry
+        assert out[url] is not None
+        assert f.last_failures == {}    # recovered → no failure recorded
+
+    def test_503_exhaustion_returns_none_and_records_failure(self, tmp_path, monkeypatch, capsys):
+        url = "https://www.amazon.com/dp/B0TEST00001"
+        state = _fake_subprocess_run(monkeypatch, [
+            _lp_result(url, 503, "Sorry! Something went wrong."),
+        ])
+        f = _lp_fetcher(tmp_path)
+        out = f.fetch_all([url])
+        assert state["n"] == 3          # all retries exhausted
+        assert out[url] is None
+        assert f.last_failures[url] == "HTTP 503"
+        captured = capsys.readouterr()
+        assert "failed 1 URL(s) after 3 attempt(s)" in captured.out
+        assert "HTTP 503" in captured.out
+
+    def test_error_page_content_detected_even_with_status_200(self, tmp_path, monkeypatch):
+        """Lightpanda sometimes reports the CloudFront 503 page with
+        http_status 200 — the body signature must still trigger a retry."""
+        url = "https://www.amazon.com/dp/B0TEST00001"
+        state = _fake_subprocess_run(monkeypatch, [
+            _lp_result(url, 200, "<html><body>Sorry! Something went wrong.<br/>Request ID: abc123</body></html>"),
+            _lp_result(url, 200, "<html><div data-asin='B0TEST00001'>book</div></html>"),
+        ])
+        f = _lp_fetcher(tmp_path)
+        out = f.fetch_all([url])
+        assert state["n"] == 2
+        assert out[url] is not None
+
+    def test_real_page_with_status_200_is_not_retried(self, tmp_path, monkeypatch):
+        url = "https://www.amazon.com/dp/B0TEST00001"
+        big_html = "<html><body>" + ("<div data-asin='B%d'>book</div>" * 200) + "</body></html>"
+        state = _fake_subprocess_run(monkeypatch, [
+            _lp_result(url, 200, big_html),
+        ])
+        f = _lp_fetcher(tmp_path)
+        out = f.fetch_all([url])
+        assert state["n"] == 1          # no pointless retry
+        assert out[url] is not None
+
+    def test_fallback_only_after_exhaustion(self, config, capsys):
+        from sources.fallback_fetcher import FallbackFetcher
+        from bs4 import BeautifulSoup
+        url = "https://www.amazon.com/dp/B0TEST00001"
+        primary = _FakeFetcher({url: None}, failures={url: "HTTP 503"})
+        fallback = _FakeFetcher({url: BeautifulSoup("<html><div data-asin='X'>b</div></html>", "lxml")})
+        ff = FallbackFetcher(primary, fallback, config)
+        out = ff.fetch_all([url])
+        assert fallback.calls == 1
+        assert out[url] is not None
+        captured = capsys.readouterr()
+        assert "1 URL(s) failed" in captured.out
+        assert "503" in captured.out
+
+    def test_no_fallback_on_partial_success(self, config):
+        from sources.fallback_fetcher import FallbackFetcher
+        from bs4 import BeautifulSoup
+        u1 = "https://www.amazon.com/dp/B0TEST00001"
+        u2 = "https://www.amazon.com/dp/B0TEST00002"
+        soup = BeautifulSoup("<html><body>ok</body></html>", "lxml")
+        primary = _FakeFetcher({u1: soup, u2: None}, failures={u2: "HTTP 503"})
+        fallback = _FakeFetcher({u1: soup, u2: soup})
+        ff = FallbackFetcher(primary, fallback, config)
+        out = ff.fetch_all([u1, u2])
+        assert fallback.calls == 0          # partial success → no curl_cffi fallback
+        assert out[u1] is not None and out[u2] is None

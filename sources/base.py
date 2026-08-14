@@ -15,6 +15,11 @@ class BaseScraper:
     the same handshake as a real Chrome browser, not a Python script.
     """
     
+    # Backoff between retries for rate-limit (429) / server-error (5xx)
+    # responses. Amazon/CloudFront 503 needs a longer cool-down than a
+    # network blip, so use an escalating ladder instead of 2**attempt.
+    RETRY_BACKOFF = [5, 15, 30]
+    
     def __init__(self, config: dict[str, Any]):
         self.config = config
         self.scraping_cfg = config.get("scraping", {})
@@ -53,7 +58,12 @@ class BaseScraper:
     
     def fetch_html(self, url: str, max_retries: int = 3) -> BeautifulSoup | None:
         """Fetch a URL and return a BeautifulSoup object. Retries on failure.
-        Uses impersonate='chrome124' for TLS fingerprint mimicry."""
+        Uses impersonate='chrome124' for TLS fingerprint mimicry.
+
+        HTTP 429 / 5xx (rate-limit, CloudFront 503) are retried with an
+        escalating backoff (5s/15s/30s) since Amazon rate-limits need longer
+        cool-down than a transient network blip.
+        """
         for attempt in range(max_retries):
             try:
                 self._rotate_ua()
@@ -62,6 +72,17 @@ class BaseScraper:
                     timeout=30,
                     impersonate="chrome124",  # TLS fingerprint impersonation
                 )
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    if attempt < max_retries - 1:
+                        backoff = self.RETRY_BACKOFF[min(attempt, len(self.RETRY_BACKOFF) - 1)]
+                        print(f"  [WARN] Attempt {attempt+1}/{max_retries} for {url}: "
+                              f"HTTP {resp.status_code} (rate-limit/server error), "
+                              f"retrying in {backoff}s")
+                        time.sleep(backoff)
+                        continue
+                    print(f"  [WARN] Attempt {attempt+1}/{max_retries} for {url}: "
+                          f"HTTP {resp.status_code} (rate-limit/server error) — giving up")
+                    return None
                 resp.raise_for_status()
                 self._sleep()
                 return BeautifulSoup(resp.text, "lxml")
@@ -72,7 +93,9 @@ class BaseScraper:
         return None
     
     def fetch_json(self, url: str, max_retries: int = 3) -> dict | list | None:
-        """Fetch a URL expecting JSON response. Used for back-end API scraping."""
+        """Fetch a URL expecting JSON response. Used for back-end API scraping.
+        Same 429/5xx rate-limit retry behavior as fetch_html.
+        """
         for attempt in range(max_retries):
             try:
                 self._rotate_ua()
@@ -81,6 +104,17 @@ class BaseScraper:
                     timeout=30,
                     impersonate="chrome124",
                 )
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    if attempt < max_retries - 1:
+                        backoff = self.RETRY_BACKOFF[min(attempt, len(self.RETRY_BACKOFF) - 1)]
+                        print(f"  [WARN] API attempt {attempt+1}/{max_retries} for {url}: "
+                              f"HTTP {resp.status_code} (rate-limit/server error), "
+                              f"retrying in {backoff}s")
+                        time.sleep(backoff)
+                        continue
+                    print(f"  [WARN] API attempt {attempt+1}/{max_retries} for {url}: "
+                          f"HTTP {resp.status_code} (rate-limit/server error) — giving up")
+                    return None
                 resp.raise_for_status()
                 self._sleep()
                 return resp.json()

@@ -168,6 +168,8 @@ scraping:
   lightpanda_bin: /home/stefan/.local/bin/lightpanda
   lightpanda_cookies: /tmp/lightpanda-cookies.json
   lightpanda_wait_ms: 6000
+  lightpanda_retries: 3           # attempts for retryable failures (HTTP 429/5xx)
+  lightpanda_retry_backoff: [5, 15, 30]   # seconds between retry attempts
 covers:
   enabled: true
   max_count: 10
