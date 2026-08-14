@@ -185,6 +185,13 @@ REGION_NON_US_MARKERS = [
     (re.escape("€"), "EUR pricing"),
     (re.escape("&euro;"), "EUR pricing"),
     (re.escape("£"), "GBP pricing"),
+    # Visible RON/lei pricing (t_d84465dd, spike RC-3): the region cookie
+    # jar is a single fake session-id, so a cookie loss / IP change can
+    # silently flip the storefront to RON. The "currencyCode" JSON marker
+    # isn't always present, but visible "RON 9.02" / "lei 9,02" price text
+    # is — detect it instead of silently parsing RON prices as USD.
+    (r"\bRON\b", "RON pricing"),
+    (r"\blei\b", "RON pricing"),
 ]
 
 
@@ -298,6 +305,24 @@ def main() -> None:
     avail_dropped = avail_before - len(filtered)
     if avail_dropped:
         print(f"  ❌ Availability: dropped {avail_dropped} unavailable/pre-order book(s)", file=sys.stderr)
+
+    # --- Layer 3 (t_d84465dd, spike RC-2): history-based deal fallback ---
+    # The ebook "Digital List Price" is only server-rendered for ~1 in 7
+    # pages; for the rest no list price exists in the no-JS HTML, so
+    # savings_pct stays unset and the strict >=50% gate below would drop
+    # EVERY real deal. A book with no list-price savings can still be a
+    # genuine price drop: mark it list_source="history" when it's under the
+    # cap, so the require_discount gate lets it through. The best-price-30d
+    # / anti-stale storage gates (applied in the dedup loop below) still
+    # ensure only fresh, at-or-below-best prices actually surface. The
+    # strict >=50% gate stays in force whenever a digital list price IS
+    # available (savings_pct set).
+    for book in filtered:
+        if (book.get("savings_pct") is None and book.get("list_price") is None
+                and book_filter.matches_price(book.get("price"))):
+            book["list_source"] = "history"
+            print(f"  📉 HISTORY DEAL (no digital list on page): {book.get('title', '')[:50]} "
+                  f"(${book['price']:.2f})", file=sys.stderr)
 
     # Re-filter with accurate prices (some may now exceed max_price)
     # and the BookBub limited-time gate (only real >=50% discounts).

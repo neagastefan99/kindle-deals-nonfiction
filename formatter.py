@@ -35,6 +35,12 @@ def _format_book_entry(book: dict[str, Any]) -> str:
     # ebook list price), not an everyday low price.
     if savings_pct is not None and savings_pct >= 50:
         details += " ⏳ limited time"
+    elif book.get("list_source") == "history":
+        # History-based price drop (t_d84465dd): the page exposed no digital
+        # list price, so no savings % exists — the deal signal is a fresh
+        # at-or-below-best price vs the 30-day history. Mark it as a drop
+        # rather than an everyday cheap price.
+        details += " 📉 price drop"
     if url:
         details += f"  🔗 [Link]({url})"
     lines.append(details)

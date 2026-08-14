@@ -1238,3 +1238,318 @@ class TestRobotCheckDetection:
         from sources.base import BaseScraper
         assert "captcha" in BaseScraper._robot_check_reason(
             "Click the button below to continue shopping")
+
+
+# ─── Visible RON/lei region markers (t_d84465dd, spike RC-3) ───────
+
+class TestRegionDetectionVisibleRON:
+    def test_visible_ron_pricing_detected(self):
+        # The currencyCode JSON isn't always present but the rendered
+        # "RON 9.02" price text is — detect it (t_d84465dd, spike RC-3).
+        from scraper import detect_region
+        region, evidence = detect_region(
+            '<html>Kindle RON 0.00 or RON 9.02 to buy</html>')
+        assert region == "non-US"
+        assert "RON" in evidence
+
+    def test_visible_lei_pricing_detected(self):
+        from scraper import detect_region
+        region, evidence = detect_region('<html>9,02 lei</html>')
+        assert region == "non-US"
+        assert "RON" in evidence
+
+
+# ─── Buybox Digital List Price (t_d84465dd Layer 1 / spike RC-1) ───
+
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
+def _fixture_soup(name: str):
+    from bs4 import BeautifulSoup
+    html = (FIXTURES_DIR / f"{name}.html").read_text()
+    return BeautifulSoup(html, "lxml")
+
+
+class TestBuyboxDigitalListPrice:
+    """Layer 1 (t_d84465dd, spike RC-1): the ebook list price now lives in
+    the buybox apex-basisprice-value labelled 'Digital List Price' — NOT in
+    the Kindle swatch (the struck price is gone from the no-JS HTML). The
+    parser must read it and set list_source='apex_basisprice_digital'.
+    'Print List Price' (apex-basisprice-value with a print label) must
+    never be used as a savings basis."""
+
+    def _scraper(self):
+        from sources.amazon import AmazonDealsScraper
+        cfg = {"sources": {"amazon": {
+            "base_url": "https://www.amazon.com",
+            "deals_x": "/x",
+        }}, "scraping": {"max_books_per_source": 50}}
+        return AmazonDealsScraper(cfg)
+
+    def test_digital_list_fixture_extracts_list_and_savings(self):
+        # Real B0FX7CJNYJ dump: Digital List Price: $4.99, Kindle $2.49 to buy
+        info = self._scraper().parse_product_page(_fixture_soup("digital_list_buybox"))
+        assert info["price"] == 2.49
+        assert info["list_price"] == 4.99
+        assert info["list_source"] == "apex_basisprice_digital"
+        assert info["savings_pct"] == 50        # round((1-2.49/4.99)*100)
+        assert info["available"] is True
+
+    def test_print_list_fixture_never_used(self):
+        # Real B00J1ISJFA dump: Print List Price: $20.00 → NOT the ebook
+        # list; no savings may be claimed from it (t_13047664).
+        info = self._scraper().parse_product_page(_fixture_soup("print_list_buybox"))
+        assert info["price"] == 1.99
+        assert "list_price" not in info
+        assert "savings_pct" not in info
+
+    def test_no_basisprice_fixture_no_list(self):
+        # Real B08GC6FXVZ dump (Kindle Unlimited, no basisprice at all)
+        info = self._scraper().parse_product_page(_fixture_soup("no_basisprice_buybox"))
+        assert info["price"] == 1.99
+        assert "list_price" not in info
+        assert "savings_pct" not in info
+
+    def test_helper_digital_vs_print(self):
+        from sources.amazon import AmazonDealsScraper
+        assert AmazonDealsScraper._buybox_digital_list_price(
+            _fixture_soup("digital_list_buybox")) == 4.99
+        assert AmazonDealsScraper._buybox_digital_list_price(
+            _fixture_soup("print_list_buybox")) is None
+        assert AmazonDealsScraper._buybox_digital_list_price(
+            _fixture_soup("no_basisprice_buybox")) is None
+        assert AmazonDealsScraper._buybox_digital_list_price(None) is None
+
+    def test_helper_with_label_sibling_dom(self):
+        # Compact synthetic DOM mirroring the real layout: offscreen label
+        # ("Digital List Price: $4.99") + visible label + value as siblings
+        # inside the same centralizedApexBasisPriceCSS div.
+        body = (
+            '<div class="centralizedApexBasisPriceCSS">'
+            '<span class="apex-basisprice-feature"><span class="aok-relative">'
+            '<span data-basisprice-label="{label} {price}" class="a-size-small aok-offscreen '
+            'apex-basisprice-offscreen-label">Digital List Price: $4.99</span>'
+            '<span aria-hidden="true" class="a-size-small a-color-secondary aok-align-center">'
+            '<span class="apex-basisprice-label">Digital List Price:</span>'
+            '<span class="a-price a-text-price apex-basisprice-value" data-a-size="s" '
+            'data-a-strike="true" data-a-color="secondary">'
+            '<span class="a-offscreen">$4.99</span><span aria-hidden="true">$4.99</span>'
+            '</span></span></span></div>'
+        )
+        from bs4 import BeautifulSoup
+        from sources.amazon import AmazonDealsScraper
+        soup = BeautifulSoup(body, "lxml")
+        assert AmazonDealsScraper._buybox_digital_list_price(soup) == 4.99
+        # Same DOM but labelled Print → None
+        soup_print = BeautifulSoup(body.replace("Digital List Price", "Print List Price"), "lxml")
+        assert AmazonDealsScraper._buybox_digital_list_price(soup_print) is None
+
+    def test_digital_list_wired_before_legacy_basis(self):
+        # Both the new buybox digital list AND the legacy "Kindle Price"
+        # basis present: the buybox digital list wins (it's the modern,
+        # exact "Digital List Price" source).
+        body = (
+            '<div id="tmmSwatches"><div class="swatchElement" id="tmm-grid-swatch-KINDLE">'
+            '<span class="a-button-text">Kindle $2.49 Available instantly</span>'
+            '</div></div>'
+            '<span class="apex-pricetopay-value">$ 2 . 49</span>'
+            '<div class="centralizedApexBasisPriceCSS">'
+            '<span class="apex-basisprice-offscreen-label">Digital List Price: $4.99</span>'
+            '<span class="apex-basisprice-value">$4.99 $4.99</span></div>'
+            '<span class="kindle-price">Kindle Price: $2.49 '
+            '<span class="a-color-secondary">List Price:</span> '
+            '<span class="a-text-price">$9.99</span></span>'
+        )
+        from bs4 import BeautifulSoup
+        info = self._scraper().parse_product_page(BeautifulSoup(body, "lxml"))
+        assert info["list_price"] == 4.99
+        assert info["list_source"] == "apex_basisprice_digital"
+        assert info["savings_pct"] == 50
+
+
+# ─── Currency-agnostic parsing (t_d84465dd Layer 2) ────────────────
+
+class TestCurrencyAgnosticParsing:
+    """The parser must not anchor on '$': a RON-served page ("RON 9.02",
+    "lei 9,02") must still extract prices instead of silently returning
+    None everywhere (spike RC-3)."""
+
+    def _scraper(self):
+        from sources.amazon import AmazonDealsScraper
+        cfg = {"sources": {"amazon": {
+            "base_url": "https://www.amazon.com",
+            "deals_x": "/x",
+        }}, "scraping": {"max_books_per_source": 50}}
+        return AmazonDealsScraper(cfg)
+
+    def _info(self, body: str) -> dict:
+        from bs4 import BeautifulSoup
+        return self._scraper().parse_product_page(
+            BeautifulSoup(f"<html><body>{body}</body></html>", "lxml"))
+
+    def test_clean_price_strips_leading_currency(self):
+        from sources.amazon import AmazonDealsScraper
+        assert AmazonDealsScraper._clean_price("RON 9.02") == 9.02
+        assert AmazonDealsScraper._clean_price("USD 12.99") == 12.99
+        assert AmazonDealsScraper._clean_price("lei 9.02") == 9.02
+        assert AmazonDealsScraper._clean_price("€ 3.66") == 3.66
+        assert AmazonDealsScraper._clean_price("£ 7.99") == 7.99
+        assert AmazonDealsScraper._clean_price("$1.99") == 1.99          # unchanged
+        assert AmazonDealsScraper._clean_price("$12.99 $12.99") == 12.99  # unchanged
+
+    def test_ron_membership_row_parses(self):
+        # "Kindle RON 0.00 or RON 9.02 to buy" — the "to buy" price wins,
+        # the row counts as a priced Kindle ebook, and it's buyable.
+        info = self._info(
+            '<div id="tmmSwatches"><div class="swatchElement" id="tmm-grid-swatch-KINDLE">'
+            'Kindle RON 0.00 or RON 9.02 to buy</div></div>'
+            '<span class="apex-pricetopay-value">RON 9 . 02</span>')
+        assert info["price"] == 9.02
+        assert info.get("is_ebook") is True
+        assert info.get("available") is True
+
+    def test_ron_digital_list_price(self):
+        # Digital List Price rendered in RON — list extracted + savings
+        # recomputed from the currency-agnostic numbers.
+        info = self._info(
+            '<div id="tmmSwatches"><div class="swatchElement" id="tmm-grid-swatch-KINDLE">'
+            'Kindle RON 0.00 or RON 9.02 to buy</div></div>'
+            '<span class="apex-pricetopay-value">RON 9 . 02</span>'
+            '<div class="centralizedApexBasisPriceCSS">'
+            '<span class="apex-basisprice-offscreen-label">Digital List Price: RON 19.99</span>'
+            '<span class="apex-basisprice-value">RON 19.99 RON 19.99</span></div>')
+        assert info["price"] == 9.02
+        assert info["list_price"] == 19.99
+        assert info["list_source"] == "apex_basisprice_digital"
+        assert info["savings_pct"] == 55        # round((1-9.02/19.99)*100)
+
+    def test_kindle_price_basis_currency_agnostic(self):
+        from bs4 import BeautifulSoup
+        from sources.amazon import AmazonDealsScraper
+        soup = BeautifulSoup(
+            '<span class="kindle-price">Kindle Price: RON 9.02 '
+            '<span class="a-color-secondary">List Price:</span> '
+            '<span class="a-text-price">RON 19.99</span></span>', "lxml")
+        assert AmazonDealsScraper._kindle_price_basis(soup) == 19.99
+
+
+# ─── History-based deal fallback (t_d84465dd Layer 3 / spike RC-2) ──
+
+class TestHistoryDealFallback:
+    """A book with NO digital list price on the page (savings_pct unset)
+    is still a deal when the pipeline flagged list_source='history'
+    (price under the cap + fresh at-or-below-best vs 30-day history). The
+    strict >=50% gate stays in force whenever savings_pct IS available."""
+
+    def test_history_marker_passes_require_discount(self, bf):
+        book = nf_book(savings_pct=None, list_price=None, list_source="history")
+        assert bf.apply([book], require_discount=True) == [book]
+
+    def test_no_marker_still_dropped(self, bf):
+        book = nf_book(savings_pct=None, list_price=None)
+        assert bf.apply([book], require_discount=True) == []
+
+    def test_verified_discount_still_passes_strict_gate(self, bf):
+        book = nf_book(savings_pct=80)
+        assert bf.apply([book], require_discount=True) == [book]
+
+    def test_verified_small_discount_still_dropped(self, bf):
+        # A real list price with savings < 50% is not a deal — history
+        # fallback must NOT rescue it (only the absence of a list price).
+        book = nf_book(savings_pct=30, list_price=2.99, list_source="kindle_row")
+        assert bf.apply([book], require_discount=True) == []
+
+    def test_history_marker_over_cap_dropped(self, bf):
+        book = nf_book(price=7.99, savings_pct=None, list_price=None,
+                       list_source="history")
+        assert bf.apply([book], require_discount=True) == []
+
+    def test_matches_discount_or_history(self, bf):
+        assert bf.matches_discount_or_history(nf_book(savings_pct=80)) is True
+        assert bf.matches_discount_or_history(
+            nf_book(savings_pct=None, list_source="history")) is True
+        assert bf.matches_discount_or_history(nf_book(savings_pct=None)) is False
+        assert bf.matches_discount_or_history(nf_book(savings_pct=20)) is False
+
+
+# ─── Availability: Kindle-Unlimited membership rows (t_d84465dd L4) ─
+
+class TestAvailabilityKURow:
+    """'Kindle $0.00 or $1.99 to buy' is a buyable now (KU membership +
+    purchase price) — available=True. Only 'Currently unavailable' /
+    'will be released on' / 'Pre-order' mean unavailable."""
+
+    def test_ku_row_or_price_to_buy_available(self):
+        body = ('<div id="tmmSwatches"><div class="swatchElement selected" '
+                'id="tmm-grid-swatch-KINDLE">'
+                '<span class="slot-title">Kindle</span>'
+                '<span class="slot-price"><span class="ebook-price-value">$0.00</span></span>'
+                '<span class="slot-extraMessage"><span class="kindleExtraMessage">'
+                '<span>or $1.99 to buy</span></span></span>'
+                '</div></div>')
+        info = _nf_scraper().parse_product_page(_pp_soup(body))
+        assert info.get("available") is True
+        assert info.get("preorder", False) is False
+
+    def test_ku_row_ron_available(self):
+        body = ('<div id="tmmSwatches"><div class="swatchElement" '
+                'id="tmm-grid-swatch-KINDLE">'
+                'Kindle RON 0.00 or RON 9.02 to buy</div></div>')
+        info = _nf_scraper().parse_product_page(_pp_soup(body))
+        assert info.get("available") is True
+
+    def test_unavailable_still_unavailable_with_or_price(self):
+        # Even a row that mentions a to-buy price but ALSO says currently
+        # unavailable must stay unavailable (unavailable wins).
+        body = ('<div id="tmmSwatches"><div class="swatchElement" '
+                'id="tmm-grid-swatch-KINDLE">'
+                'Kindle $0.00 or $1.99 to buy Currently unavailable</div></div>')
+        info = _nf_scraper().parse_product_page(_pp_soup(body))
+        assert info.get("available") is False
+
+
+# ─── Formatter: history-deal marker (t_d84465dd Layer 3) ───────────
+
+class TestHistoryDealMarker:
+    def test_history_deal_shows_price_drop_marker(self):
+        from formatter import format_report
+        r = format_report([nf_book(list_price=None, savings_pct=None,
+                                   list_source="history")], 1, 0)
+        assert "📉 price drop" in r
+        assert "limited time" not in r
+
+    def test_verified_savings_still_shows_limited_time(self):
+        from formatter import format_report
+        r = format_report([nf_book(list_price=9.99, savings_pct=80)], 1, 0)
+        assert "limited time" in r
+        assert "📉 price drop" not in r
+
+    def test_no_marker_for_plain_book(self):
+        from formatter import format_report
+        r = format_report([nf_book(list_price=None, savings_pct=None)], 1, 0)
+        assert "📉 price drop" not in r
+        assert "limited time" not in r
+
+
+# ─── No book reported with unverifiable savings % (t_d84465dd) ─────
+
+class TestNoUnverifiableSavings:
+    """The whole point of the re-architecture: a savings % is ONLY reported
+    when it was recomputed from a real digital list price. Books whose page
+    shows no digital list get list_source='history' (deal signal = price
+    drop, no % claim) or are dropped by the gate — never a made-up %."""
+
+    def test_parse_never_emits_savings_without_list(self):
+        # print-list and no-basis fixtures expose no digital list → no
+        # savings % may be claimed from them.
+        from sources.amazon import AmazonDealsScraper
+        s = AmazonDealsScraper({"sources": {"amazon": {"base_url": "https://www.amazon.com", "deals_x": "/x"}}, "scraping": {"max_books_per_source": 50}})
+        for name in ("print_list_buybox", "no_basisprice_buybox"):
+            info = s.parse_product_page(_fixture_soup(name))
+            assert info.get("savings_pct") is None
+
+    def test_formatter_never_shows_pct_for_history_deal(self):
+        from formatter import format_report
+        r = format_report([nf_book(list_price=None, savings_pct=None,
+                                   list_source="history")], 1, 0)
+        assert "% off" not in r

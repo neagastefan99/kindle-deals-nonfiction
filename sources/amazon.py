@@ -15,6 +15,19 @@ from urllib.parse import urljoin
 from sources.base import BaseScraper
 
 
+# Currency-agnostic price patterns (t_ccbd16c0): Amazon serves region-
+# specific prices ("RON 9.02", "lei 9,02", "$1.99") depending on the
+# detected geo/cookie state, so the parser must never anchor on "$". A
+# price token is a currency prefix + digits, or a bare DECIMAL number —
+# a bare integer is not enough ("Kindle 2nd edition" must not count as
+# a price).
+CURRENCY_PREFIX = r"(?:[A-Z]{3}\s*|\$\s*|€\s*|£\s*)"
+PRICE_TOKEN = rf"(?:{CURRENCY_PREFIX}\d+(?:\.\d+)?|\d+\.\d+)"
+OR_PRICE_TO_BUY = re.compile(
+    rf"\bor\s+(?:{CURRENCY_PREFIX})?(\d+(?:\.\d+)?)\s+to\s+buy",
+    re.IGNORECASE)
+
+
 class CurlCffiFetcher(BaseScraper):
     """curl_cffi transport, compatible with fetch_all interface."""
 
@@ -26,7 +39,7 @@ class CurlCffiFetcher(BaseScraper):
 
 
 class AmazonDealsScraper:
-    """Scrapes Amazon Kindle deal pages for SFF books."""
+    """Scrapes Amazon Kindle deal pages for non-fiction books."""
 
     API_PATTERNS: list[str] = []
 
@@ -76,10 +89,17 @@ class AmazonDealsScraper:
         which chokes on Amazon's duplicated price spans ("$12.99 $12.99" →
         "12.9912.99" → None) and silently mangles list prices. Taking the first
         numeric token handles duplication and Lightpanda's spaced "1 . 99" form.
+
+        Currency-agnostic (t_ccbd16c0): a leading currency code/symbol
+        (RON / USD / lei / $ / € / £) is stripped first so a page served in
+        a non-US storefront still parses instead of returning None.
         """
         if not raw:
             return None
         compact = re.sub(r"\s+", "", str(raw))
+        compact = re.sub(
+            r"^(?:RON|USD|EUR|GBP|LEI|\$|€|£|&euro;|&pound;)",
+            "", compact, flags=re.IGNORECASE)
         m = re.search(r"\d+(?:\.\d+)?", compact)
         if not m:
             return None
@@ -204,16 +224,18 @@ class AmazonDealsScraper:
         # Deal price: the "to buy" price wins on membership rows
         # ("Kindle $0.00 or $1.99 to buy" — the aria-label shows $0.00).
         # Then the dedicated price element (`.ebook-price-value`), else the
-        # first `$X.XX` token NOT inside the struck element.
+        # first price token NOT inside the struck element.
         deal = None
         text = AmazonDealsScraper._clean_text(kindle_row.get_text(" ", strip=True))
-        m = re.search(r'\bor\s+\$\s?(\d+(?:\.\d+)?)\s+to\s+buy',
-                      text, re.IGNORECASE)
+        m = OR_PRICE_TO_BUY.search(text)
         if m:
             deal = AmazonDealsScraper._clean_price(m.group(1))
         if deal is None:
             price_el = (kindle_row.select_one('.ebook-price-value')
-                        or kindle_row.select_one('span[aria-label*="$"]'))
+                        or kindle_row.select_one(
+                            'span[aria-label*="$"], span[aria-label*="RON"], '
+                            'span[aria-label*="EUR"], span[aria-label*="lei"], '
+                            'span[aria-label*="€"], span[aria-label*="£"]'))
             if price_el is not None:
                 deal = AmazonDealsScraper._clean_price(
                     price_el.get('aria-label') or price_el.get_text(" ", strip=True))
@@ -224,7 +246,7 @@ class AmazonDealsScraper:
                 struck_text = AmazonDealsScraper._clean_text(
                     struck.get_text(" ", strip=True))
                 text = text.replace(struck_text, "")
-            tokens = re.findall(r'\$\s?(\d+(?:\.\d+)?)', text)
+            tokens = re.findall(PRICE_TOKEN, text)
             if tokens:
                 deal = AmazonDealsScraper._clean_price(tokens[0])
 
@@ -232,7 +254,7 @@ class AmazonDealsScraper:
         # strike markup ("Kindle $1.99 $9.99") — keep that as a fallback.
         if list_price is None and deal is not None:
             text = AmazonDealsScraper._clean_text(kindle_row.get_text(" ", strip=True))
-            tokens = re.findall(r'\$\s?(\d+(?:\.\d+)?)', text)
+            tokens = re.findall(PRICE_TOKEN, text)
             if len(tokens) >= 2:
                 second = AmazonDealsScraper._clean_price(tokens[1])
                 if second is not None and second > deal:
@@ -241,12 +263,37 @@ class AmazonDealsScraper:
         return deal, list_price
 
     @staticmethod
+    def _buybox_digital_list_price(soup) -> float | None:
+        """Ebook list price from the buybox basisprice, ONLY when labelled
+        Digital (t_ccbd16c0, spike RC-1).
+
+        Amazon no longer renders a struck-through list price inside the
+        Kindle format swatch; the only list price in the no-JS HTML lives
+        in the buybox as `apex-basisprice-value` next to a label that says
+        either "Digital List Price: $X" (the EBOOK's own list — the correct
+        savings basis) or "Print List Price: $X" (the paperback/hardcover
+        list — must NEVER be used as a savings basis). Returns None when no
+        Digital-labelled basisprice is present.
+        """
+        if soup is None:
+            return None
+        for el in soup.select('.apex-basisprice-value'):
+            box = el.find_parent('div') or el
+            label = box.select_one(
+                '.apex-basisprice-label, .apex-basisprice-offscreen-label')
+            if label and 'digital list price' in label.get_text(' ', strip=True).lower():
+                p = AmazonDealsScraper._clean_price(el.get_text(' ', strip=True))
+                if p:
+                    return p
+        return None
+
+    @staticmethod
     def _kindle_price_basis(soup) -> float | None:
         """Ebook list price from a \"Kindle Price\" basis element (spike §6a).
 
         Classic buybox layouts render `Kindle Price: $1.99 / List Price:
-        $9.99` in a `.kindle-price` / `[class*=\"kindle-price\"]` block. The
-        \"List Price\" token there is the EBOOK's own list price — unlike
+        $9.99` in a `.kindle-price` / `[class*="kindle-price"]` block. The
+        "List Price" token there is the EBOOK's own list price — unlike
         `apex-basisprice-value`, which is the PRINT list. Returns None when
         only the print basis is present.
         """
@@ -261,7 +308,7 @@ class AmazonDealsScraper:
                 if 'print list price' in text.lower():
                     continue
                 m = re.search(
-                    r'list\s*price[^$]*?\$\s?(\d+(?:\.\d+)?)',
+                    rf'list\s*price[^0-9]*?(?:{CURRENCY_PREFIX})?\s?(\d+(?:\.\d+)?)',
                     text, re.IGNORECASE | re.DOTALL)
                 if m:
                     p = AmazonDealsScraper._clean_price(m.group(1))
@@ -298,6 +345,12 @@ class AmazonDealsScraper:
             elif "pre-order" in low or "will be released on" in low:
                 out["preorder"] = True
                 out["available"] = False
+            elif OR_PRICE_TO_BUY.search(low):
+                # Kindle-Unlimited membership row ("Kindle $0.00 or $1.99 to
+                # buy") — buyable now (t_ccbd16c0, spike RC-4). The KU $0.00
+                # token is not an availability signal by itself; the "or $X
+                # to buy" part means you can buy the ebook right now.
+                out["available"] = True
             # No status token on the Kindle row → unknown (keep)
             return out
 
@@ -371,7 +424,9 @@ class AmazonDealsScraper:
                     author = author_match.group(1).strip()
 
             price = None
-            buy_match = re.search(r"Or\s+\$?(\d+\.?\d*)\s+to\s+buy", raw_text, re.IGNORECASE)
+            buy_match = re.search(
+                rf"Or\s+(?:{CURRENCY_PREFIX})?(\d+\.?\d*)\s+to\s+buy",
+                raw_text, re.IGNORECASE)
             if buy_match:
                 price = self._clean_price(buy_match.group(1))
 
@@ -467,7 +522,7 @@ class AmazonDealsScraper:
         # blank) carries no format evidence → UNKNOWN (is_ebook unset, keep).
         swatch_box = soup.select_one('#tmmSwatches') or soup.select_one('div#formats')
         kindle_text = self._kindle_swatch_text(swatch_box)
-        if kindle_text and re.search(r'\$\s?\d+(?:\.\d+)?', kindle_text):
+        if kindle_text and re.search(PRICE_TOKEN, kindle_text, re.IGNORECASE):
             info["is_ebook"] = True
         elif swatch_box is not None and len(
                 self._clean_text(swatch_box.get_text(" ", strip=True))) > 0:
@@ -507,10 +562,21 @@ class AmazonDealsScraper:
         # unset and the caller's require_discount gate drops the book rather
         # than reporting an unverifiable savings %.
         if "list_price" not in info:
-            basis_price = self._kindle_price_basis(soup)
-            if basis_price:
-                info["list_price"] = basis_price
-                info["list_source"] = "kindle_price_basis"
+            # Layer 1 (t_ccbd16c0, spike RC-1): the ebook's Digital List
+            # Price from the buybox apex-basisprice — the modern location of
+            # the list price (Amazon stopped rendering a struck list inside
+            # the Kindle swatch). ONLY the element labelled "Digital List
+            # Price" is the ebook's own list; "Print List Price" is skipped
+            # (never a savings basis — t_13047664).
+            digital_list = self._buybox_digital_list_price(soup)
+            if digital_list:
+                info["list_price"] = digital_list
+                info["list_source"] = "apex_basisprice_digital"
+            else:
+                basis_price = self._kindle_price_basis(soup)
+                if basis_price:
+                    info["list_price"] = basis_price
+                    info["list_source"] = "kindle_price_basis"
 
         # Savings (spike §6a): recompute from price/list_price ourselves.
         # apex-savings-percentage references the PRINT list price and is

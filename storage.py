@@ -93,7 +93,7 @@ class Storage:
             return True
         entry = seen[asin]
         cutoff = self._cutoff(lookback_days)
-        hist = entry.get("price_history", {})
+        hist = entry.get("price_history") or {}
         recent = [p for d, p in hist.items() if d >= cutoff]
         if recent:
             return price <= min(recent)
@@ -111,7 +111,7 @@ class Storage:
         if asin not in seen:
             return 0
         cutoff = self._cutoff(lookback_days)
-        hist = seen[asin].get("price_history", {})
+        hist = seen[asin].get("price_history") or {}
         return sum(1 for d, p in hist.items() if d >= cutoff and abs(p - price) < 1e-6)
 
     def is_stale(self, asin: str, price: float, max_days: int = 14,

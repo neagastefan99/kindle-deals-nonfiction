@@ -22,6 +22,22 @@ class BookFilter:
         """BookBub limited-time gate: only a REAL discount (>= min_savings_pct
         off list price) counts as a deal — not just a price under the cap."""
         return savings_pct is not None and savings_pct >= self.min_savings_pct
+
+    def matches_discount_or_history(self, book: dict[str, Any]) -> bool:
+        """Discount gate + history fallback (t_d84465dd, spike RC-2).
+
+        The ebook "Digital List Price" is only server-rendered for ~1 in 7
+        product pages, so most real deals never get a savings_pct to pass
+        `matches_discount`. A book with no list-price savings is still a
+        deal when the pipeline flagged it as a history-based price drop
+        (`list_source="history"` — set in scraper.py/debug_drops.py when
+        the price is under the cap and the page exposes no digital list).
+        The strict >=50% gate applies whenever a digital list price IS
+        available (savings_pct set) — history never overrides a real,
+        verifiable discount figure, only its absence.
+        """
+        return (self.matches_discount(book.get("savings_pct"))
+                or book.get("list_source") == "history")
     
     def matches_genre(self, title: str, author: str = "", 
                       description: str = "", from_sff_page: bool = False) -> bool:
@@ -80,7 +96,7 @@ class BookFilter:
             
             if not self.matches_price(price):
                 continue
-            if require_discount and not self.matches_discount(book.get("savings_pct")):
+            if require_discount and not self.matches_discount_or_history(book):
                 continue
             if not self.matches_genre(title, author, from_sff_page=from_sff):
                 continue
