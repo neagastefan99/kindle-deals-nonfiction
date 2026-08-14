@@ -42,6 +42,67 @@ def make_scraper(config: dict) -> AmazonDealsScraper:
     return AmazonDealsScraper(config)
 
 
+def make_enrichment_fetcher(config: dict):
+    """Fetcher for product-page enrichment.
+
+    Product pages are fetched with curl_cffi DIRECTLY (not lightpanda).
+    Root cause (t_f893b2c1): lightpanda's User-Agent is "Lightpanda/1.0"
+    with Sec-CH-UA "Lightpanda" (and its --user-agent flag rejects browser
+    impersonation), so Amazon's bot protection fingerprints it and serves
+    the validateCaptcha interstitial on ~75% of product-page requests —
+    probabilistic, independent of wait_ms. curl_cffi with chrome124 TLS/UA
+    impersonation + the US cookie jar passes ~100%.
+
+    Set `scraping.product_engine: lightpanda` to restore the old
+    lightpanda+fallback behavior for product pages.
+    """
+    product_engine = config.get("scraping", {}).get("product_engine", "curl_cffi")
+    if product_engine == "lightpanda":
+        return None  # caller falls back to scraper.prefetch (lightpanda+fallback)
+    return CurlCffiFetcher(config)
+
+
+def enrich_books(filtered: list[dict], soups: dict, scraper: AmazonDealsScraper) -> list[dict]:
+    """Enrich books with LIVE product-page prices (HARD RULE, t_f893b2c1).
+
+    NEVER report a book whose live price was not confirmed from its product
+    page: a book is kept only when a soup exists AND parse_product_page
+    yields a price. Everything else (missing page, unparseable page, no
+    price on the page) is dropped with a reason — the possibly-stale
+    deal-listing price is never carried into the report.
+    """
+    enriched = []
+    for book in filtered:
+        soup = soups.get(book.get("url", ""))
+        if not soup:
+            # (e) failed enrichment → DROP (never keep the stale deal-feed price)
+            print(f"  🚫 DROP (no product page): {book['title'][:50]}", file=sys.stderr)
+            continue
+        info = scraper.parse_product_page(soup)
+        if info.get("is_ebook") is False:
+            # Edition guard (§6c): ASIN is NOT the Kindle ebook edition
+            # (print/audiobook-only listing) — drop, don't report its price.
+            book["is_ebook"] = False
+            continue
+        if not info.get("price"):
+            # (e) ambiguous enrichment: no confirmed live price → DROP
+            print(f"  🚫 DROP (no live price): {book['title'][:50]}", file=sys.stderr)
+            continue
+        book["price"] = info["price"]
+        if info.get("list_price"):
+            book["list_price"] = info["list_price"]
+        if info.get("savings_pct") is not None:
+            book["savings_pct"] = info["savings_pct"]
+        if info.get("cover_url"):
+            book["cover_url"] = info["cover_url"]
+        if "available" in info:
+            book["available"] = info["available"]
+        if info.get("preorder"):
+            book["preorder"] = True
+        enriched.append(book)
+    return enriched
+
+
 def download_cover(cover_url: str, asin: str, covers_dir: Path) -> str | None:
     """Download a cover image via curl_cffi (images don't need JS rendering)."""
     if not cover_url or not asin:
@@ -124,41 +185,19 @@ def main() -> None:
     filtered = book_filter.apply(all_books)
     print(f"  After filtering: {len(filtered)} books", file=sys.stderr)
 
-    # --- Enrich: batch-fetch all product pages, parse once ---
+    # --- Enrich: fetch all product pages (curl_cffi — lightpanda is
+    # captcha-blocked on product pages, see make_enrichment_fetcher), then
+    # parse once. The HARD RULE lives in enrich_books(): a book with no
+    # product-page-confirmed live price is DROPPED, never reported with the
+    # possibly-stale deal-listing price. ---
     print("💰 Fetching accurate product-page prices (batch)...", file=sys.stderr)
     product_urls = [b["url"] for b in filtered if b.get("url")]
-    soups = scraper.prefetch(product_urls)
-    enriched = []
-    for book in filtered:
-        soup = soups.get(book.get("url", ""))
-        if not soup:
-            # (e) failed enrichment → DROP (never keep the stale deal-feed price)
-            print(f"  🚫 DROP (no product page): {book['title'][:50]}", file=sys.stderr)
-            continue
-        info = scraper.parse_product_page(soup)
-        if info.get("is_ebook") is False:
-            # Edition guard (§6c): ASIN is NOT the Kindle ebook edition
-            # (print/audiobook-only listing) — drop, don't report its price.
-            book["is_ebook"] = False
-            continue
-        if not info.get("price"):
-            # (e) ambiguous enrichment: no confirmed live price → DROP
-            print(f"  🚫 DROP (no live price): {book['title'][:50]}", file=sys.stderr)
-            continue
-        book["price"] = info["price"]
-        if info.get("list_price"):
-            book["list_price"] = info["list_price"]
-        if info.get("savings_pct") is not None:
-            book["savings_pct"] = info["savings_pct"]
-        if info.get("cover_url"):
-            book["cover_url"] = info["cover_url"]
-        if "available" in info:
-            book["available"] = info["available"]
-        if info.get("preorder"):
-            book["preorder"] = True
-        enriched.append(book)
-
-    filtered = enriched
+    enrichment_fetcher = make_enrichment_fetcher(config)
+    if enrichment_fetcher is not None:
+        soups = enrichment_fetcher.fetch_all(product_urls)
+    else:
+        soups = scraper.prefetch(product_urls)  # lightpanda + curl_cffi fallback
+    filtered = enrich_books(filtered, soups, scraper)
     dropped_enrich = len(product_urls) - len(filtered)
     if dropped_enrich:
         print(f"  🚫 Enrichment dropped {dropped_enrich} book(s) "

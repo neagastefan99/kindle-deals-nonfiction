@@ -506,7 +506,7 @@ class TestLightpanda503Retry:
         out = f.fetch_all([url])
         assert state["n"] == 3          # all retries exhausted
         assert out[url] is None
-        assert f.last_failures[url] == "HTTP 200"
+        assert f.last_failures[url] == "captcha (continue shopping)"
 
     def test_fallback_only_after_exhaustion(self, config, capsys):
         from sources.fallback_fetcher import FallbackFetcher
@@ -977,3 +977,152 @@ class TestDiscountGate:
     def test_apply_default_keeps_missing_savings(self, bf):
         # Pre-enrichment pass must not require the discount yet
         assert len(bf.apply([nf_book()])) == 1
+
+
+# ─── Descriptive failure reasons (t_f893b2c1) ───────────────────────
+
+class TestErrorReason:
+    """last_failures/log reasons must say WHAT failed (captcha vs rate-limit),
+    not a meaningless 'HTTP 200'."""
+
+    def test_rate_limit_status(self):
+        assert LightpandaFetcher._error_reason(503, "anything") == "HTTP 503"
+
+    def test_captcha_validate(self):
+        content = ("<h4>Click the button below to continue shopping</h4>"
+                   "<form action='/errors_page/validateCaptcha'>")
+        # The real interstitial contains BOTH signatures; the first listed
+        # (validateCaptcha) wins.
+        assert LightpandaFetcher._error_reason(200, content) == "captcha (validateCaptcha)"
+
+    def test_cloudfront_sorry(self):
+        assert LightpandaFetcher._error_reason(
+            200, "<html>Sorry! Something went wrong.</html>") == "cloudfront 503"
+
+    def test_unknown_body(self):
+        assert LightpandaFetcher._error_reason(200, "<html>hello</html>") == "error page content"
+
+
+# ─── Noise: one summarized WARN line, per-URL only in debug (t_f893b2c1) ─
+
+class TestSummarizedWarning:
+    def test_normal_run_summarizes_reasons_without_urls(self, tmp_path, monkeypatch, capsys):
+        url = "https://www.amazon.com/dp/B0TEST00001"
+        captcha = ("<html><body><h4>Click the button below to continue "
+                   "shopping</h4></body></html>")
+        state = _fake_subprocess_run(monkeypatch, [_lp_result(url, 200, captcha)])
+        cfg = {"scraping": {
+            "lightpanda_cookies": str(tmp_path / "cookies.json"),
+            "lightpanda_retries": 3,
+            "lightpanda_retry_backoff": [0, 0],
+            "debug": False,
+        }}
+        f = LightpandaFetcher(cfg)
+        f.fetch_all([url])
+        out = capsys.readouterr().out
+        assert "failed 1 URL(s) after 3 attempt(s): 1× captcha (continue shopping)" in out
+        # Normal mode: no per-URL dump
+        assert "https://www.amazon.com/dp/B0TEST00001" not in out
+
+    def test_debug_mode_dumps_per_url(self, tmp_path, monkeypatch, capsys):
+        url = "https://www.amazon.com/dp/B0TEST00001"
+        captcha = ("<html><body><h4>Click the button below to continue "
+                   "shopping</h4></body></html>")
+        state = _fake_subprocess_run(monkeypatch, [_lp_result(url, 200, captcha)])
+        cfg = {"scraping": {
+            "lightpanda_cookies": str(tmp_path / "cookies.json"),
+            "lightpanda_retries": 3,
+            "lightpanda_retry_backoff": [0, 0],
+            "debug": True,
+        }}
+        f = LightpandaFetcher(cfg)
+        f.fetch_all([url])
+        out = capsys.readouterr().out
+        assert "failed 1 URL(s) after 3 attempt(s): 1× captcha (continue shopping)" in out
+        assert url in out          # per-URL dump present in debug mode
+
+    def test_mixed_reasons_aggregated(self, tmp_path, monkeypatch, capsys):
+        u1 = "https://www.amazon.com/dp/B0TEST00001"
+        u2 = "https://www.amazon.com/dp/B0TEST00002"
+        u3 = "https://www.amazon.com/dp/B0TEST00003"
+        one_response = json.dumps({"results": [
+            {"url": u1, "http_status": 200,
+             "content": "<h4>Click the button below to continue shopping</h4>"},
+            {"url": u2, "http_status": 200,
+             "content": "<h4>Click the button below to continue shopping</h4>"},
+            {"url": u3, "http_status": 503,
+             "content": "Sorry! Something went wrong."},
+        ]})
+        state = _fake_subprocess_run(monkeypatch, [one_response])
+        cfg = {"scraping": {
+            "lightpanda_cookies": str(tmp_path / "cookies.json"),
+            "lightpanda_retries": 1,
+        }}
+        f = LightpandaFetcher(cfg)
+        f.fetch_all([u1, u2, u3])
+        out = capsys.readouterr().out
+        assert "2× captcha (continue shopping)" in out
+        assert "1× HTTP 503" in out
+        assert u1 not in out         # no URLs in normal mode
+
+
+# ─── HARD RULE: never report a book without a live product-page price ─
+
+class TestEnrichHardRule:
+    """enrich_books() must DROP books whose live price can't be confirmed
+    from the product page (t_f893b2c1) — no stale deal-listing price may
+    reach the report."""
+
+    def _scraper(self):
+        from sources.amazon import AmazonDealsScraper
+        cfg = {"sources": {"amazon": {
+            "base_url": "https://www.amazon.com",
+            "nonfiction_deals": "/x",
+        }}, "scraping": {"max_books_per_source": 50}}
+        return AmazonDealsScraper(cfg)
+
+    def _soup(self, body: str):
+        from bs4 import BeautifulSoup
+        return BeautifulSoup(f"<html><body>{body}</body></html>", "lxml")
+
+    def test_no_soup_dropped(self, capsys):
+        from scraper import enrich_books
+        book = nf_book(url="https://www.amazon.com/dp/B0TEST00001")
+        out = enrich_books([book], {}, self._scraper())
+        assert out == []
+        assert "DROP (no product page)" in capsys.readouterr().err
+
+    def test_soup_without_price_dropped(self, capsys):
+        from scraper import enrich_books
+        book = nf_book(url="https://www.amazon.com/dp/B0TEST00001")
+        soups = {"https://www.amazon.com/dp/B0TEST00001": self._soup("<div>no price here</div>")}
+        out = enrich_books([book], soups, self._scraper())
+        assert out == []
+        assert "DROP (no live price)" in capsys.readouterr().err
+
+    def test_captcha_page_dropped(self, capsys):
+        # A captcha interstitial has no product price → dropped, never
+        # reported with the deal-listing price.
+        from scraper import enrich_books
+        book = nf_book(url="https://www.amazon.com/dp/B0TEST00001", price=0.99)
+        captcha = ("<div class='a-box'><h4>Click the button below to continue "
+                   "shopping</h4></div>")
+        soups = {"https://www.amazon.com/dp/B0TEST00001": self._soup(captcha)}
+        out = enrich_books([book], soups, self._scraper())
+        assert out == []
+
+    def test_live_price_kept_and_overwrites(self, capsys):
+        from scraper import enrich_books
+        book = nf_book(url="https://www.amazon.com/dp/B0TEST00001", price=0.99)
+        body = (
+            '<div id="tmmSwatches">'
+            '<div class="swatchElement" id="tmm-grid-swatch-KINDLE">'
+            '<span class="slot-price"><span aria-label="$1.99" class="ebook-price-value">$1.99</span></span>'
+            '<span class="slot-extraMessage">Available instantly</span>'
+            '</div></div>'
+            '<span class="apex-pricetopay-value">$ 1 . 99</span>'
+        )
+        soups = {"https://www.amazon.com/dp/B0TEST00001": self._soup(body)}
+        out = enrich_books([book], soups, self._scraper())
+        assert len(out) == 1
+        assert out[0]["price"] == 1.99     # live product-page price wins
