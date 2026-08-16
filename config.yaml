@@ -166,7 +166,11 @@ scraping:
   - Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like
     Gecko) Version/17.4 Safari/605.1.15
   max_books_per_source: 50
-  engine: lightpanda
+  # engine: curl_cffi (default, battle-tested). lightpanda is DEPRECATED for
+  # this stack — Amazon hard-blocks it on DEAL pages (HTTP 503 100%, t_4c79a713)
+  # AND PRODUCT pages (validateCaptcha ~75%, t_f893b2c1). curl_cffi (chrome124
+  # impersonation + US cookie jar) passes ~100% on both.
+  engine: curl_cffi
   auto_fallback: true
   # product_engine: which transport fetches PRODUCT pages for enrichment.
   # curl_cffi (default): lightpanda's UA ("Lightpanda/1.0") is fingerprintable
@@ -177,7 +181,7 @@ scraping:
   lightpanda_bin: /home/stefan/.local/bin/lightpanda
   lightpanda_cookies: /tmp/lightpanda-cookies.json
   lightpanda_wait_ms: 6000
-  lightpanda_retries: 3           # attempts for retryable failures (HTTP 429/5xx)
+  lightpanda_retries: 1           # deprecated engine — single attempt, then curl_cffi fallback
   lightpanda_retry_backoff: [5, 15, 30]   # seconds between retry attempts
   # debug: true → per-URL failure dumps in the log (normal runs summarize per batch)
   debug: false
